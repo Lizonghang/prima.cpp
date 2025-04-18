@@ -312,6 +312,10 @@ struct disk_props {
         write_rnd_bw(0.0f) {}
 };
 
+struct startup_args{
+    bool should_profile;
+};
+
 struct device_info {
     uint32_t            rank;
     const char *        device_name;

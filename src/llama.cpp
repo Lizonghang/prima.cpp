@@ -20262,6 +20262,46 @@ int llama_send_device_info(struct llama_context * ctx, struct device_info * dev_
     return 0;
 }
 
+LLAMA_API int llama_bcast_startup_args(llama_context *ctx, uint32_t rank, startup_args *args) {
+    int32_t n_world = ctx->cparams.n_world;
+    if (n_world == 1) {
+        return 0;
+    }
+    GGML_ASSERT(ctx != nullptr && ctx->send_socket != nullptr);
+    if (rank==0){
+        // send
+        try {
+            std::vector<zmq::message_t> send_msgs;
+            send_msgs.emplace_back("should_profile", strlen("should_profile"));
+            send_msgs.emplace_back(&args->should_profile, sizeof(args->should_profile));
+            zmq::send_multipart(*ctx->send_socket, send_msgs);
+        } catch (const zmq::error_t& e) {
+            LLAMA_LOG_INFO("Failed to send data: %s\n", e.what());
+            return -1;
+        }
+    }else {
+        // receive
+        std::vector<zmq::message_t> recv_msgs;
+        if (!zmq::recv_multipart(*ctx->recv_socket, std::back_inserter(recv_msgs))) {
+            return -1;
+        }
+        GGML_ASSERT(recv_msgs[0].to_string() == "should_profile");
+        GGML_ASSERT(recv_msgs[1].size() == sizeof(bool));
+        bool should_profile = *static_cast<bool*>(recv_msgs[1].data());
+        args->should_profile = should_profile;
+        if (rank != n_world-1){
+            // send
+            try {
+                zmq::send_multipart(*ctx->send_socket, recv_msgs);
+            } catch (const zmq::error_t& e) {
+                LLAMA_LOG_INFO("Failed to send data: %s\n", e.what());
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 int llama_bcast_layer_setup(struct llama_context * ctx, uint32_t * n_layer_window, uint32_t * n_gpu_layers) {
     uint32_t n_world = ctx->cparams.n_world;
     if (n_world == 1) {
