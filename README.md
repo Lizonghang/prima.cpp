@@ -98,7 +98,7 @@ Here are the models we have tested so far. You can also try more on Hugging Face
 - **DeepSeek R1-8B (Q4K, Q6K, Q80):** [deepseek-ai.DeepSeek-R1-Distill-Llama-8B](https://huggingface.co/DevQuasar/deepseek-ai.DeepSeek-R1-Distill-Llama-8B-GGUF)
 - **DeepSeek R1-14B (Q4K, Q6K, Q80):** [deepseek-ai.DeepSeek-R1-Distill-Qwen-14B](https://huggingface.co/DevQuasar/deepseek-ai.DeepSeek-R1-Distill-Qwen-14B-GGUF)
 - **DeepSeek R1-32B (Q4K, Q6K, Q80):** [deepseek-ai.DeepSeek-R1-Distill-Qwen-32B](https://huggingface.co/DevQuasar/deepseek-ai.DeepSeek-R1-Distill-Qwen-32B-GGUF)
-- **DeepSeek R1-70B (Q4K, Q6K, Q80):** [DeepSeek-R1-Distill-Llama-70B](https://huggingface.co/unsloth/DeepSeek-R1-Distill-Llama-70B-GGUF)
+- **DeepSeek R1-70B (Q4K, Q6K, Q80, [IQ1](https://huggingface.co/bartowski/DeepSeek-R1-Distill-Llama-70B-GGUF)):** [DeepSeek-R1-Distill-Llama-70B](https://huggingface.co/unsloth/DeepSeek-R1-Distill-Llama-70B-GGUF)
 
 ## ⚙️ How to Use?
 

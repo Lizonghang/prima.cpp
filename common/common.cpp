@@ -901,13 +901,19 @@ static bool assign_layers_to_device(
         float t_read_ram_cpu = 0.0f;
 
         float t_calc_cpu = (
-            master.model_flops.layer_f32_f32 / (dev.cpu_props.flops_f32_f32 * 1e9 + EPS) +
-            master.model_flops.layer_f16_f32 / (dev.cpu_props.flops_f16_f32 * 1e9 + EPS) +
-            master.model_flops.layer_q4k_f32 / (dev.cpu_props.flops_q4k_f32 * 1e9 + EPS) +
-            master.model_flops.layer_q50_f32 / (dev.cpu_props.flops_q50_f32 * 1e9 + EPS) +
-            master.model_flops.layer_q5k_f32 / (dev.cpu_props.flops_q5k_f32 * 1e9 + EPS) +
-            master.model_flops.layer_q6k_f32 / (dev.cpu_props.flops_q6k_f32 * 1e9 + EPS) +
-            master.model_flops.layer_q80_f32 / (dev.cpu_props.flops_q80_f32 * 1e9 + EPS)) * 1000; // in ms
+            master.model_flops.layer_f32_f32   / (dev.cpu_props.flops_f32_f32   * 1e9 + EPS) +
+            master.model_flops.layer_f16_f32   / (dev.cpu_props.flops_f16_f32   * 1e9 + EPS) +
+            master.model_flops.layer_q2k_f32   / (dev.cpu_props.flops_q2k_f32   * 1e9 + EPS) +
+            master.model_flops.layer_q4k_f32   / (dev.cpu_props.flops_q4k_f32   * 1e9 + EPS) +
+            master.model_flops.layer_q5k_f32   / (dev.cpu_props.flops_q5k_f32   * 1e9 + EPS) +
+            master.model_flops.layer_q6k_f32   / (dev.cpu_props.flops_q6k_f32   * 1e9 + EPS) +
+            master.model_flops.layer_iq2xxs_f32/ (dev.cpu_props.flops_iq2xxs_f32* 1e9 + EPS) +
+            master.model_flops.layer_q50_f32   / (dev.cpu_props.flops_q50_f32   * 1e9 + EPS) +
+            master.model_flops.layer_q80_f32   / (dev.cpu_props.flops_q80_f32   * 1e9 + EPS) +
+            master.model_flops.layer_iq1s_f32  / (dev.cpu_props.flops_iq1s_f32  * 1e9 + EPS) +
+            master.model_flops.layer_iq4nl_f32 / (dev.cpu_props.flops_iq4nl_f32 * 1e9 + EPS) +
+            master.model_flops.layer_iq1m_f32  / (dev.cpu_props.flops_iq1m_f32  * 1e9 + EPS) ) * 1000; // in ms
+
         float t_kv_cpy_cpu = dev.memory.mem_cpy_delay; // in ms
         // t_read_ram_cpu = b_prime / (dev.memory.cpu_read_ram_bw * 1e9) * 1000; // in ms
 
@@ -921,24 +927,36 @@ static bool assign_layers_to_device(
 
             if (dev.gpu_support.metal) {
                 t_calc_gpu = (
-                    master.model_flops.layer_f32_f32 / (dev.gpu_props.metal_flops_f32_f32 * 1e9 + EPS) +
-                    master.model_flops.layer_f16_f32 / (dev.gpu_props.metal_flops_f16_f32 * 1e9 + EPS) +
-                    master.model_flops.layer_q4k_f32 / (dev.gpu_props.metal_flops_q4k_f32 * 1e9 + EPS) +
-                    master.model_flops.layer_q50_f32 / (dev.gpu_props.metal_flops_q50_f32 * 1e9 + EPS) +
-                    master.model_flops.layer_q5k_f32 / (dev.gpu_props.metal_flops_q5k_f32 * 1e9 + EPS) +
-                    master.model_flops.layer_q6k_f32 / (dev.gpu_props.metal_flops_q6k_f32 * 1e9 + EPS) +
-                    master.model_flops.layer_q80_f32 / (dev.gpu_props.metal_flops_q80_f32 * 1e9 + EPS)) * 1000; // in ms
+                    master.model_flops.layer_f32_f32    / (dev.gpu_props.metal_flops_f32_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_f16_f32    / (dev.gpu_props.metal_flops_f16_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_q2k_f32    / (dev.gpu_props.metal_flops_q2k_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_q4k_f32    / (dev.gpu_props.metal_flops_q4k_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_q5k_f32    / (dev.gpu_props.metal_flops_q5k_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_q6k_f32    / (dev.gpu_props.metal_flops_q6k_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_iq2xxs_f32 / (dev.gpu_props.metal_flops_iq2xxs_f32 * 1e9 + EPS) +
+                    master.model_flops.layer_q50_f32    / (dev.gpu_props.metal_flops_q50_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_q80_f32    / (dev.gpu_props.metal_flops_q80_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_iq1s_f32   / (dev.gpu_props.metal_flops_iq1s_f32   * 1e9 + EPS) +
+                    master.model_flops.layer_iq4nl_f32  / (dev.gpu_props.metal_flops_iq4nl_f32  * 1e9 + EPS) +
+                    master.model_flops.layer_iq1m_f32   / (dev.gpu_props.metal_flops_iq1m_f32   * 1e9 + EPS) ) * 1000; // in ms
+
                 t_kv_cpy_gpu = dev.gpu_props.metal_mem_cpy_delay; // in ms
                 // t_read_ram_gpu = b_prime / (dev.gpu_props.metal_read_vram_bw * 1e9) * 1000; // in ms
             } else {
                 t_calc_gpu = (
-                    master.model_flops.layer_f32_f32 / (dev.gpu_props.cuda_flops_f32_f32 * 1e9 + EPS) +
-                    master.model_flops.layer_f16_f32 / (dev.gpu_props.cuda_flops_f16_f32 * 1e9 + EPS) +
-                    master.model_flops.layer_q4k_f32 / (dev.gpu_props.cuda_flops_q4k_f32 * 1e9 + EPS) +
-                    master.model_flops.layer_q50_f32 / (dev.gpu_props.cuda_flops_q50_f32 * 1e9 + EPS) +
-                    master.model_flops.layer_q5k_f32 / (dev.gpu_props.cuda_flops_q5k_f32 * 1e9 + EPS) +
-                    master.model_flops.layer_q6k_f32 / (dev.gpu_props.cuda_flops_q6k_f32 * 1e9 + EPS) +
-                    master.model_flops.layer_q80_f32 / (dev.gpu_props.cuda_flops_q80_f32 * 1e9 + EPS)) * 1000; // in ms
+                    master.model_flops.layer_f32_f32    / (dev.gpu_props.cuda_flops_f32_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_f16_f32    / (dev.gpu_props.cuda_flops_f16_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_q2k_f32    / (dev.gpu_props.cuda_flops_q2k_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_q4k_f32    / (dev.gpu_props.cuda_flops_q4k_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_q5k_f32    / (dev.gpu_props.cuda_flops_q5k_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_q6k_f32    / (dev.gpu_props.cuda_flops_q6k_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_iq2xxs_f32 / (dev.gpu_props.cuda_flops_iq2xxs_f32 * 1e9 + EPS) +
+                    master.model_flops.layer_q50_f32    / (dev.gpu_props.cuda_flops_q50_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_q80_f32    / (dev.gpu_props.cuda_flops_q80_f32    * 1e9 + EPS) +
+                    master.model_flops.layer_iq1s_f32   / (dev.gpu_props.cuda_flops_iq1s_f32   * 1e9 + EPS) +
+                    master.model_flops.layer_iq4nl_f32  / (dev.gpu_props.cuda_flops_iq4nl_f32  * 1e9 + EPS) +
+                    master.model_flops.layer_iq1m_f32   / (dev.gpu_props.cuda_flops_iq1m_f32   * 1e9 + EPS) ) * 1000; // in ms
+
                 t_kv_cpy_gpu = dev.gpu_props.cuda_mem_cpy_delay; // in ms
                 // t_read_ram_gpu = b_prime / (dev.gpu_props.cuda_read_vram_bw * 1e9) * 1000; // in ms
             }
@@ -1113,14 +1131,18 @@ static bool assign_layers_to_device(
 
             if (m == 0) {
                 kappa = (
-                    dev.model_flops.layer_f32_f32 / (dev.cpu_props.flops_f32_f32 * 1e9 + EPS) +
-                    dev.model_flops.layer_f16_f32 / (dev.cpu_props.flops_f16_f32 * 1e9 + EPS) +
-                    dev.model_flops.layer_q4k_f32 / (dev.cpu_props.flops_q4k_f32 * 1e9 + EPS) +
-                    dev.model_flops.layer_q50_f32 / (dev.cpu_props.flops_q50_f32 * 1e9 + EPS) +
-                    dev.model_flops.layer_q5k_f32 / (dev.cpu_props.flops_q5k_f32 * 1e9 + EPS) +
-                    dev.model_flops.layer_q6k_f32 / (dev.cpu_props.flops_q6k_f32 * 1e9 + EPS) +
-                    dev.model_flops.layer_q80_f32 / (dev.cpu_props.flops_q80_f32 * 1e9 + EPS)) * 1000; // in ms
-
+                    dev.model_flops.layer_f32_f32    / (dev.cpu_props.flops_f32_f32    * 1e9 + EPS) +
+                    dev.model_flops.layer_f16_f32    / (dev.cpu_props.flops_f16_f32    * 1e9 + EPS) +
+                    dev.model_flops.layer_q2k_f32    / (dev.cpu_props.flops_q2k_f32    * 1e9 + EPS) +
+                    dev.model_flops.layer_q4k_f32    / (dev.cpu_props.flops_q4k_f32    * 1e9 + EPS) +
+                    dev.model_flops.layer_q5k_f32    / (dev.cpu_props.flops_q5k_f32    * 1e9 + EPS) +
+                    dev.model_flops.layer_q6k_f32    / (dev.cpu_props.flops_q6k_f32    * 1e9 + EPS) +
+                    dev.model_flops.layer_iq2xxs_f32 / (dev.cpu_props.flops_iq2xxs_f32 * 1e9 + EPS) +
+                    dev.model_flops.layer_q50_f32    / (dev.cpu_props.flops_q50_f32    * 1e9 + EPS) +
+                    dev.model_flops.layer_q80_f32    / (dev.cpu_props.flops_q80_f32    * 1e9 + EPS) +
+                    dev.model_flops.layer_iq1s_f32   / (dev.cpu_props.flops_iq1s_f32   * 1e9 + EPS) +
+                    dev.model_flops.layer_iq4nl_f32  / (dev.cpu_props.flops_iq4nl_f32  * 1e9 + EPS) +
+                    dev.model_flops.layer_iq1m_f32   / (dev.cpu_props.flops_iq1m_f32   * 1e9 + EPS) ) * 1000; // in ms
                 // kappa += (bi / n_vocab + bo) / (dev.memory.cpu_read_ram_bw * 1e9) * 1000; // in ms
 
                 kappa += (bi / n_vocab) / (disk_speed[m] * 1e9) * 1000; // in ms
@@ -1554,13 +1576,6 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
     uint32_t my_rank   = params.rank;
     bool auto_schedule = params.n_layer_window[0] == 0;
     
-    // get device profile
-    LOG_INF("\nstart profiling this device, this may take some seconds ...\n");
-    dev_info.rank = params.rank;
-    if (n_world > 1) {
-        llama_profile_device(&dev_info, model, ml, params.gpu_mem, params.n_predict, params.n_ctx, params.cpuparams.n_threads, params.flash_attn);
-    }
-
     // create llama context
     struct llama_context_params cparams = llama_context_params_from_gpt_params(params);
     llama_context * lctx                = llama_new_context_with_model(model, cparams);
@@ -1577,16 +1592,34 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
         // initialize sockets
         llama_init_sockets(lctx, n_world, my_rank);
 
+        // broadcast startup args
+        struct startup_args args;
+        if (my_rank==0){
+            args.should_profile = auto_schedule;
+        }
+        llama_bcast_startup_args(lctx, my_rank, &args);
+
+        auto_schedule = args.should_profile;
+        // if n_world > 1 and need auto schdule, then prifile
+        if (auto_schedule){
+            // get device profile
+            LOG_INF("\nstart profiling this device, this may take some seconds ...\n");
+            dev_info.rank = params.rank;
+            if (n_world > 1) {
+                llama_profile_device(&dev_info, model, ml, params.gpu_mem, params.n_predict, params.n_ctx, params.cpuparams.n_threads, params.flash_attn);
+            }
+        }
+
         // sychronize device profile to the master node
-        struct device_info * dev_info_set = nullptr;
         if (my_rank == 0) {
-            dev_info_set = (struct device_info *)malloc(n_world * sizeof(struct device_info));
-            dev_info_set[0] = dev_info;
-
-            llama_gather_device_info(lctx, dev_info_set);
-            device_print_props(dev_info_set, n_world, model, cparams);
-
             if (auto_schedule) {
+                struct device_info * dev_info_set = nullptr;
+                dev_info_set = (struct device_info *)malloc(n_world * sizeof(struct device_info));
+                dev_info_set[0] = dev_info;
+
+                llama_gather_device_info(lctx, dev_info_set);
+                device_print_props(dev_info_set, n_world, model, cparams);
+
                 // automatically determine n_layer_window and n_gpu_layers
                 if (!assign_layers_to_device(n_world, my_rank, dev_info_set, n_layer_window, n_gpu_layers, model, cparams)) {
                     LOG_ERR("%s: Invalid allocation by HiGHS solver\n", __func__);
@@ -1601,7 +1634,9 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
                 llama_bcast_layer_setup(lctx, n_layer_window, nullptr);
             }
         } else {
-            llama_send_device_info(lctx, &dev_info);
+            if (auto_schedule){
+                llama_send_device_info(lctx, &dev_info);
+            }
             llama_recv_layer_setup(lctx, n_layer_window, n_gpu_layers);
         }
 
@@ -1766,33 +1801,25 @@ struct llama_model_params llama_model_params_from_gpt_params(const gpt_params & 
     return mparams;
 }
 
-static ggml_type kv_cache_type_from_str(const std::string & s) {
-    if (s == "f32") {
-        return GGML_TYPE_F32;
-    }
-    if (s == "f16") {
-        return GGML_TYPE_F16;
-    }
-    if (s == "q8_0") {
-        return GGML_TYPE_Q8_0;
-    }
-    if (s == "q4_0") {
-        return GGML_TYPE_Q4_0;
-    }
-    if (s == "q4_1") {
-        return GGML_TYPE_Q4_1;
-    }
-    if (s == "iq4_nl") {
-        return GGML_TYPE_IQ4_NL;
-    }
-    if (s == "q5_0") {
-        return GGML_TYPE_Q5_0;
-    }
-    if (s == "q5_1") {
-        return GGML_TYPE_Q5_1;
-    }
+const std::vector<ggml_type> kv_cache_types = {
+    GGML_TYPE_F32,
+    GGML_TYPE_F16,
+    GGML_TYPE_BF16, // Added BF16 data type support
+    GGML_TYPE_Q8_0,
+    GGML_TYPE_Q4_0,
+    GGML_TYPE_Q4_1,
+    GGML_TYPE_IQ4_NL,
+    GGML_TYPE_Q5_0,
+    GGML_TYPE_Q5_1,
+};
 
-    throw std::runtime_error("Invalid cache type: " + s);
+static ggml_type kv_cache_type_from_str(const std::string & s) {
+    for (const auto & type : kv_cache_types) {
+        if (ggml_type_name(type) == s) {
+            return type;
+        }
+    }
+    throw std::runtime_error("Unsupported cache type: " + s);
 }
 
 struct llama_context_params llama_context_params_from_gpt_params(const gpt_params & params) {

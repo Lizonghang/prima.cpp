@@ -165,18 +165,18 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_Q2_K_S        = 21, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ3_XS        = 22, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ3_XXS       = 23, // except 1d tensors
-        LLAMA_FTYPE_MOSTLY_IQ1_S         = 24, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_IQ1_S         = 24, // except 1d tensors, 1 bit quantization
         LLAMA_FTYPE_MOSTLY_IQ4_NL        = 25, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ3_S         = 26, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ3_M         = 27, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ2_S         = 28, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ2_M         = 29, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ4_XS        = 30, // except 1d tensors
-        LLAMA_FTYPE_MOSTLY_IQ1_M         = 31, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_IQ1_M         = 31, // except 1d tensors, 1 bit quantization
         LLAMA_FTYPE_MOSTLY_BF16          = 32, // except 1d tensors
-        LLAMA_FTYPE_MOSTLY_Q4_0_4_4      = 33, // except 1d tensors
-        LLAMA_FTYPE_MOSTLY_Q4_0_4_8      = 34, // except 1d tensors
-        LLAMA_FTYPE_MOSTLY_Q4_0_8_8      = 35, // except 1d tensors
+        // LLAMA_FTYPE_MOSTLY_Q4_0_4_4      = 33, // removed from gguf files, use Q4_0 and runtime repack
+        // LLAMA_FTYPE_MOSTLY_Q4_0_4_8      = 34, // removed from gguf files, use Q4_0 and runtime repack
+        // LLAMA_FTYPE_MOSTLY_Q4_0_8_8      = 35, // removed from gguf files, use Q4_0 and runtime repack
         LLAMA_FTYPE_MOSTLY_TQ1_0         = 36, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_TQ2_0         = 37, // except 1d tensors
 
@@ -453,6 +453,7 @@ extern "C" {
     LLAMA_API void llama_free_sockets      (struct llama_context * ctx, char ** msg);
     LLAMA_API int  llama_gather_device_info(struct llama_context * ctx, struct device_info * dev_info_set);
     LLAMA_API int  llama_send_device_info  (struct llama_context * ctx, struct device_info * dev_info);
+    LLAMA_API int  llama_bcast_startup_args(struct llama_context * ctx, uint32_t rank,  struct startup_args * args);
     LLAMA_API int  llama_bcast_layer_setup (struct llama_context * ctx, uint32_t * n_layer_window, uint32_t * n_gpu_layers);
     LLAMA_API int  llama_recv_layer_setup  (struct llama_context * ctx, uint32_t * n_layer_window, uint32_t * n_gpu_layers);
 

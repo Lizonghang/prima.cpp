@@ -3560,16 +3560,26 @@ static bool is_dtype_exist(struct model_params * n_params, enum ggml_type dtype)
         case GGML_TYPE_F32:
         case GGML_TYPE_F16:    
             return true;
+        case GGML_TYPE_Q2_K:
+            return n_params->layer_q2k    > 0 || n_params->output_q2k    > 0;
         case GGML_TYPE_Q4_K:
-            return n_params->layer_q4k > 0 || n_params->output_q4k > 0;
-        case GGML_TYPE_Q5_0:
-            return n_params->layer_q50 > 0 || n_params->output_q50 > 0;
+            return n_params->layer_q4k    > 0 || n_params->output_q4k    > 0;
         case GGML_TYPE_Q5_K:
-            return n_params->layer_q5k > 0 || n_params->output_q5k > 0;
+            return n_params->layer_q5k    > 0 || n_params->output_q5k    > 0;
         case GGML_TYPE_Q6_K:
-            return n_params->layer_q6k > 0 || n_params->output_q6k > 0;
+            return n_params->layer_q6k    > 0 || n_params->output_q6k    > 0;
+        case GGML_TYPE_IQ2_XXS:
+            return n_params->layer_iq2xxs > 0 || n_params->output_iq2xxs > 0;
+        case GGML_TYPE_Q5_0:
+            return n_params->layer_q50    > 0 || n_params->output_q50    > 0;
         case GGML_TYPE_Q8_0:
-            return n_params->layer_q80 > 0 || n_params->output_q80 > 0;
+            return n_params->layer_q80    > 0 || n_params->output_q80    > 0;
+        case GGML_TYPE_IQ1_S:
+            return n_params->layer_iq1s   > 0 || n_params->output_iq1s   > 0;
+        case GGML_TYPE_IQ4_NL:
+            return n_params->layer_iq4nl  > 0 || n_params->output_iq4nl  > 0;
+        case GGML_TYPE_IQ1_M:
+            return n_params->layer_iq1m   > 0 || n_params->output_iq1m   > 0;
         default:
             throw std::runtime_error("Unrecognized data type\n");
     }
@@ -3650,16 +3660,16 @@ void llama_profile_device(
         dev_info->gpu_props.cuda_flops_f16_f32  = device_cuda_flops (model, GGML_TYPE_F16,  GGML_TYPE_F32);
     }
 
+    if (is_dtype_exist(n_params, GGML_TYPE_Q2_K)) {
+        dev_info->cpu_props.flops_q2k_f32       = device_cpu_flops  (model, GGML_TYPE_Q2_K, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_q2k_f32 = device_metal_flops(model, GGML_TYPE_Q2_K, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_q2k_f32  = device_cuda_flops (model, GGML_TYPE_Q2_K, GGML_TYPE_F32);
+    }
+
     if (is_dtype_exist(n_params, GGML_TYPE_Q4_K)) {
         dev_info->cpu_props.flops_q4k_f32       = device_cpu_flops  (model, GGML_TYPE_Q4_K, GGML_TYPE_F32, n_threads);
         dev_info->gpu_props.metal_flops_q4k_f32 = device_metal_flops(model, GGML_TYPE_Q4_K, GGML_TYPE_F32);
         dev_info->gpu_props.cuda_flops_q4k_f32  = device_cuda_flops (model, GGML_TYPE_Q4_K, GGML_TYPE_F32);
-    }
-
-    if (is_dtype_exist(n_params, GGML_TYPE_Q5_0)) {
-        dev_info->cpu_props.flops_q50_f32       = device_cpu_flops  (model, GGML_TYPE_Q5_0, GGML_TYPE_F32, n_threads);
-        dev_info->gpu_props.metal_flops_q50_f32 = device_metal_flops(model, GGML_TYPE_Q5_0, GGML_TYPE_F32);
-        dev_info->gpu_props.cuda_flops_q50_f32  = device_cuda_flops (model, GGML_TYPE_Q5_0, GGML_TYPE_F32);
     }
 
     if (is_dtype_exist(n_params, GGML_TYPE_Q5_K)) {
@@ -3674,10 +3684,41 @@ void llama_profile_device(
         dev_info->gpu_props.cuda_flops_q6k_f32  = device_cuda_flops (model, GGML_TYPE_Q6_K, GGML_TYPE_F32);
     }
 
+    if (is_dtype_exist(n_params, GGML_TYPE_IQ2_XXS)) {
+        dev_info->cpu_props.flops_iq2xxs_f32    = device_cpu_flops  (model, GGML_TYPE_IQ2_XXS, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_iq2xxs_f32= device_metal_flops(model, GGML_TYPE_IQ2_XXS, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_iq2xxs_f32 = device_cuda_flops (model, GGML_TYPE_IQ2_XXS, GGML_TYPE_F32);
+    }
+
+    if (is_dtype_exist(n_params, GGML_TYPE_Q5_0)) {
+        dev_info->cpu_props.flops_q50_f32       = device_cpu_flops  (model, GGML_TYPE_Q5_0, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_q50_f32 = device_metal_flops(model, GGML_TYPE_Q5_0, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_q50_f32  = device_cuda_flops (model, GGML_TYPE_Q5_0, GGML_TYPE_F32);
+    }
+
+
     if (is_dtype_exist(n_params, GGML_TYPE_Q8_0)) {
         dev_info->cpu_props.flops_q80_f32       = device_cpu_flops  (model, GGML_TYPE_Q8_0, GGML_TYPE_F32, n_threads);
         dev_info->gpu_props.metal_flops_q80_f32 = device_metal_flops(model, GGML_TYPE_Q8_0, GGML_TYPE_F32);
         dev_info->gpu_props.cuda_flops_q80_f32  = device_cuda_flops (model, GGML_TYPE_Q8_0, GGML_TYPE_F32);
+    }
+
+    if (is_dtype_exist(n_params, GGML_TYPE_IQ1_S)) {
+        dev_info->cpu_props.flops_iq1s_f32      = device_cpu_flops  (model, GGML_TYPE_IQ1_S, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_iq1s_f32= device_metal_flops(model, GGML_TYPE_IQ1_S, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_iq1s_f32 = device_cuda_flops (model, GGML_TYPE_IQ1_S, GGML_TYPE_F32);
+    }
+
+    if (is_dtype_exist(n_params, GGML_TYPE_IQ4_NL)) {
+        dev_info->cpu_props.flops_iq4nl_f32     = device_cpu_flops   (model, GGML_TYPE_IQ4_NL, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_iq4nl_f32= device_metal_flops(model, GGML_TYPE_IQ4_NL, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_iq4nl_f32 = device_cuda_flops (model, GGML_TYPE_IQ4_NL, GGML_TYPE_F32);
+    }
+
+    if (is_dtype_exist(n_params, GGML_TYPE_IQ1_M)) {
+        dev_info->cpu_props.flops_iq1m_f32      = device_cpu_flops  (model, GGML_TYPE_IQ1_M, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_iq1m_f32= device_metal_flops(model, GGML_TYPE_IQ1_M, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_iq1m_f32 = device_cuda_flops (model, GGML_TYPE_IQ1_M, GGML_TYPE_F32);
     }
 }
 
@@ -4844,9 +4885,7 @@ struct llama_model_loader {
                 case GGML_TYPE_IQ4_NL:  ftype = LLAMA_FTYPE_MOSTLY_IQ4_NL;  break;
                 case GGML_TYPE_IQ4_XS:  ftype = LLAMA_FTYPE_MOSTLY_IQ4_XS;  break;
                 case GGML_TYPE_IQ3_S:   ftype = LLAMA_FTYPE_MOSTLY_IQ3_S;   break;
-                case GGML_TYPE_Q4_0_4_4: ftype = LLAMA_FTYPE_MOSTLY_Q4_0_4_4; break;
-                case GGML_TYPE_Q4_0_4_8: ftype = LLAMA_FTYPE_MOSTLY_Q4_0_4_8; break;
-                case GGML_TYPE_Q4_0_8_8: ftype = LLAMA_FTYPE_MOSTLY_Q4_0_8_8; break;
+
                 default:
                     {
                         LLAMA_LOG_WARN("%s: unknown type %s\n", __func__, ggml_type_name(type_max));
@@ -5654,9 +5693,6 @@ static std::string llama_model_ftype_name(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_IQ4_XS:   return "IQ4_XS - 4.25 bpw";
         case LLAMA_FTYPE_MOSTLY_IQ3_S:    return "IQ3_S - 3.4375 bpw";
         case LLAMA_FTYPE_MOSTLY_IQ3_M:    return "IQ3_S mix - 3.66 bpw";
-        case LLAMA_FTYPE_MOSTLY_Q4_0_4_4: return "Q4_0_4_4";
-        case LLAMA_FTYPE_MOSTLY_Q4_0_4_8: return "Q4_0_4_8";
-        case LLAMA_FTYPE_MOSTLY_Q4_0_8_8: return "Q4_0_8_8";
 
         default: return "unknown, may not work";
     }
@@ -18997,10 +19033,6 @@ static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type n
             else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_XXS) {
                 new_type = GGML_TYPE_IQ3_S;
             }
-            else if (new_type == GGML_TYPE_Q4_0_4_4 || new_type == GGML_TYPE_Q4_0_4_8 ||
-                     new_type == GGML_TYPE_Q4_0_8_8) {
-                new_type = GGML_TYPE_Q4_0;
-            }
             else if (ftype == LLAMA_FTYPE_MOSTLY_TQ1_0 || ftype == LLAMA_FTYPE_MOSTLY_TQ2_0) {
                 new_type = GGML_TYPE_Q4_K;
             }
@@ -19323,10 +19355,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         case LLAMA_FTYPE_MOSTLY_IQ4_XS:  default_type = GGML_TYPE_IQ4_XS;  break;
         case LLAMA_FTYPE_MOSTLY_IQ3_S:   default_type = GGML_TYPE_IQ3_S;   break;
         case LLAMA_FTYPE_MOSTLY_IQ3_M:   default_type = GGML_TYPE_IQ3_S;   break;
-        case LLAMA_FTYPE_MOSTLY_Q4_0_4_4: default_type = GGML_TYPE_Q4_0_4_4; break;
-        case LLAMA_FTYPE_MOSTLY_Q4_0_4_8: default_type = GGML_TYPE_Q4_0_4_8; break;
-        case LLAMA_FTYPE_MOSTLY_Q4_0_8_8: default_type = GGML_TYPE_Q4_0_8_8; break;
-
+        
         default: throw std::runtime_error(format("invalid output file type %d\n", ftype));
     }
 
@@ -19646,14 +19675,6 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                 f32_data = (float *) f32_conv_buf.data();
             }
 
-            int chunk_size_multiplier = 1;
-            if (new_type == GGML_TYPE_Q4_0_4_4 || new_type == GGML_TYPE_Q4_0_4_8 || new_type == GGML_TYPE_Q4_0_8_8) {
-                if ((new_type == GGML_TYPE_Q4_0_8_8) && (tensor->ne[1] % 8 != 0)) new_type = GGML_TYPE_Q4_0;
-                else if (tensor->ne[1] % 4 != 0) new_type = GGML_TYPE_Q4_0;
-                if (new_type == GGML_TYPE_Q4_0_8_8) chunk_size_multiplier = 8;
-                else if (new_type == GGML_TYPE_Q4_0_4_4 || new_type == GGML_TYPE_Q4_0_4_8) chunk_size_multiplier = 4;
-            }
-
             LLAMA_LOG_INFO("converting to %s .. ", ggml_type_name(new_type));
             fflush(stdout);
 
@@ -19666,8 +19687,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
             const int64_t nrows = tensor->ne[1];
 
             static const int64_t min_chunk_size = 32 * 512;
-            const int64_t chunk_size = (n_per_row >= min_chunk_size ? n_per_row : n_per_row * ((min_chunk_size + n_per_row - 1)/n_per_row)) *
-                                       chunk_size_multiplier;
+            const int64_t chunk_size = (n_per_row >= min_chunk_size ? n_per_row : n_per_row * ((min_chunk_size + n_per_row - 1)/n_per_row));
 
             const int64_t nelements_matrix = tensor->ne[0] * tensor->ne[1];
             const int64_t nchunk = (nelements_matrix + chunk_size - 1)/chunk_size;
@@ -20239,6 +20259,46 @@ int llama_send_device_info(struct llama_context * ctx, struct device_info * dev_
         return -1;
     }
 
+    return 0;
+}
+
+LLAMA_API int llama_bcast_startup_args(llama_context *ctx, uint32_t rank, startup_args *args) {
+    int32_t n_world = ctx->cparams.n_world;
+    if (n_world == 1) {
+        return 0;
+    }
+    GGML_ASSERT(ctx != nullptr && ctx->send_socket != nullptr);
+    if (rank==0){
+        // send
+        try {
+            std::vector<zmq::message_t> send_msgs;
+            send_msgs.emplace_back("should_profile", strlen("should_profile"));
+            send_msgs.emplace_back(&args->should_profile, sizeof(args->should_profile));
+            zmq::send_multipart(*ctx->send_socket, send_msgs);
+        } catch (const zmq::error_t& e) {
+            LLAMA_LOG_INFO("Failed to send data: %s\n", e.what());
+            return -1;
+        }
+    }else {
+        // receive
+        std::vector<zmq::message_t> recv_msgs;
+        if (!zmq::recv_multipart(*ctx->recv_socket, std::back_inserter(recv_msgs))) {
+            return -1;
+        }
+        GGML_ASSERT(recv_msgs[0].to_string() == "should_profile");
+        GGML_ASSERT(recv_msgs[1].size() == sizeof(bool));
+        bool should_profile = *static_cast<bool*>(recv_msgs[1].data());
+        args->should_profile = should_profile;
+        if (rank != n_world-1){
+            // send
+            try {
+                zmq::send_multipart(*ctx->send_socket, recv_msgs);
+            } catch (const zmq::error_t& e) {
+                LLAMA_LOG_INFO("Failed to send data: %s\n", e.what());
+                return -1;
+            }
+        }
+    }
     return 0;
 }
 
@@ -21049,25 +21109,40 @@ static void count_n_flops(struct model_flops * n_flops, enum ggml_type dtype, en
         case PROFILER_LAYER_OUTPUT:
             switch (dtype) {
                 case GGML_TYPE_F32:
-                    n_flops->output_f32_f32 += n;
+                    n_flops->output_f32_f32    += n;
                     break;
                 case GGML_TYPE_F16:
-                    n_flops->output_f16_f32 += n;
+                    n_flops->output_f16_f32    += n;
+                    break;
+                case GGML_TYPE_Q2_K:
+                    n_flops->output_q2k_f32    += n;
                     break;
                 case GGML_TYPE_Q4_K:
-                    n_flops->output_q4k_f32 += n;
-                    break;
-                case GGML_TYPE_Q5_0:
-                    n_flops->output_q50_f32 += n;
+                    n_flops->output_q4k_f32    += n;
                     break;
                 case GGML_TYPE_Q5_K:
-                    n_flops->output_q5k_f32 += n;
+                    n_flops->output_q5k_f32    += n;
                     break;
                 case GGML_TYPE_Q6_K:
-                    n_flops->output_q6k_f32 += n;
+                    n_flops->output_q6k_f32    += n;
+                    break;
+                case GGML_TYPE_IQ2_XXS:
+                    n_flops->output_iq2xxs_f32 += n;
+                    break;
+                case GGML_TYPE_Q5_0:
+                    n_flops->output_q50_f32    += n;
                     break;
                 case GGML_TYPE_Q8_0:
-                    n_flops->output_q80_f32 += n;
+                    n_flops->output_q80_f32    += n;
+                    break;
+                case GGML_TYPE_IQ1_S:
+                    n_flops->output_iq1s_f32   += n;
+                    break;
+                case GGML_TYPE_IQ4_NL:
+                    n_flops->output_iq4nl_f32  += n;
+                    break;
+                case GGML_TYPE_IQ1_M:
+                    n_flops->output_iq1m_f32   += n;
                     break;
                 default:
                     throw std::runtime_error("Unrecognized weight type in PROFILER_LAYER_OUTPUT\n");
@@ -21075,27 +21150,42 @@ static void count_n_flops(struct model_flops * n_flops, enum ggml_type dtype, en
             break;
 
         case PROFILER_LAYER_BACKEND:
-            switch (dtype) {
+              switch (dtype) {
                 case GGML_TYPE_F32:
-                    n_flops->layer_f32_f32 += n;
+                    n_flops->layer_f32_f32    += n;
                     break;
                 case GGML_TYPE_F16:
-                    n_flops->layer_f16_f32 += n;
+                    n_flops->layer_f16_f32    += n;
+                    break;
+                case GGML_TYPE_Q2_K:
+                    n_flops->layer_q2k_f32    += n;
                     break;
                 case GGML_TYPE_Q4_K:
-                    n_flops->layer_q4k_f32 += n;
-                    break;
-                case GGML_TYPE_Q5_0:
-                    n_flops->layer_q50_f32 += n;
+                    n_flops->layer_q4k_f32    += n;
                     break;
                 case GGML_TYPE_Q5_K:
-                    n_flops->layer_q5k_f32 += n;
+                    n_flops->layer_q5k_f32    += n;
                     break;
                 case GGML_TYPE_Q6_K:
-                    n_flops->layer_q6k_f32 += n;
+                    n_flops->layer_q6k_f32    += n;
+                    break;
+                case GGML_TYPE_IQ2_XXS:
+                    n_flops->layer_iq2xxs_f32 += n;
+                    break;
+                case GGML_TYPE_Q5_0:
+                    n_flops->layer_q50_f32    += n;
                     break;
                 case GGML_TYPE_Q8_0:
-                    n_flops->layer_q80_f32 += n;
+                    n_flops->layer_q80_f32    += n;
+                    break;
+                case GGML_TYPE_IQ1_S:
+                    n_flops->layer_iq1s_f32   += n;
+                    break;
+                case GGML_TYPE_IQ4_NL:
+                    n_flops->layer_iq4nl_f32  += n;
+                    break;
+                case GGML_TYPE_IQ1_M:
+                    n_flops->layer_iq1m_f32   += n;
                     break;
                 default:
                     throw std::runtime_error("Unrecognized weight type in PROFILER_LAYER_BACKEND\n");
@@ -21113,25 +21203,40 @@ static void count_n_params(struct model_params * n_params, enum ggml_type dtype,
         case PROFILER_LAYER_INPUT:
             switch (dtype) {
                 case GGML_TYPE_F32:
-                    n_params->input_f32 += n_i64t;
+                    n_params->input_f32    += n_i64t;
                     break;
                 case GGML_TYPE_F16:
-                    n_params->input_f16 += n_i64t;
+                    n_params->input_f16    += n_i64t;
+                    break;
+                case GGML_TYPE_Q2_K:
+                    n_params->input_q2k    += n_i64t;
                     break;
                 case GGML_TYPE_Q4_K:
-                    n_params->input_q4k += n_i64t;
-                    break;
-                case GGML_TYPE_Q5_0:
-                    n_params->input_q50 += n_i64t;
+                    n_params->input_q4k    += n_i64t;
                     break;
                 case GGML_TYPE_Q5_K:
-                    n_params->input_q5k += n_i64t;
+                    n_params->input_q5k    += n_i64t;
                     break;
                 case GGML_TYPE_Q6_K:
-                    n_params->input_q6k += n_i64t;
+                    n_params->input_q6k    += n_i64t;
+                    break;
+                case GGML_TYPE_IQ2_XXS:
+                    n_params->input_iq2xxs += n_i64t;
+                    break;
+                case GGML_TYPE_Q5_0:
+                    n_params->input_q50    += n_i64t;
                     break;
                 case GGML_TYPE_Q8_0:
-                    n_params->input_q80 += n_i64t;
+                    n_params->input_q80    += n_i64t;
+                    break;
+                case GGML_TYPE_IQ1_S:
+                    n_params->input_iq1s   += n_i64t;
+                    break;
+                case GGML_TYPE_IQ4_NL:
+                    n_params->input_iq4nl  += n_i64t;
+                    break;
+                case GGML_TYPE_IQ1_M:
+                    n_params->input_iq1m   += n_i64t;
                     break;
                 default:
                     throw std::runtime_error("Unrecognized weight type in PROFILER_LAYER_OUTPUT\n");
@@ -21141,25 +21246,40 @@ static void count_n_params(struct model_params * n_params, enum ggml_type dtype,
         case PROFILER_LAYER_OUTPUT:
             switch (dtype) {
                 case GGML_TYPE_F32:
-                    n_params->output_f32 += n_i64t;
+                    n_params->output_f32    += n_i64t;
                     break;
                 case GGML_TYPE_F16:
-                    n_params->output_f16 += n_i64t;
+                    n_params->output_f16    += n_i64t;
+                    break;
+                case GGML_TYPE_Q2_K:
+                    n_params->output_q2k    += n_i64t;
                     break;
                 case GGML_TYPE_Q4_K:
-                    n_params->output_q4k += n_i64t;
-                    break;
-                case GGML_TYPE_Q5_0:
-                    n_params->output_q50 += n_i64t;
+                    n_params->output_q4k    += n_i64t;
                     break;
                 case GGML_TYPE_Q5_K:
-                    n_params->output_q5k += n_i64t;
+                    n_params->output_q5k    += n_i64t;
                     break;
                 case GGML_TYPE_Q6_K:
-                    n_params->output_q6k += n_i64t;
+                    n_params->output_q6k    += n_i64t;
+                    break;
+                case GGML_TYPE_IQ2_XXS:
+                    n_params->output_iq2xxs += n_i64t;
+                    break;
+                case GGML_TYPE_Q5_0:
+                    n_params->output_q50    += n_i64t;
                     break;
                 case GGML_TYPE_Q8_0:
-                    n_params->output_q80 += n_i64t;
+                    n_params->output_q80    += n_i64t;
+                    break;
+                case GGML_TYPE_IQ1_S:
+                    n_params->output_iq1s   += n_i64t;
+                    break;
+                case GGML_TYPE_IQ4_NL:
+                    n_params->output_iq4nl  += n_i64t;
+                    break;
+                case GGML_TYPE_IQ1_M:
+                    n_params->output_iq1m   += n_i64t;
                     break;
                 default:
                     throw std::runtime_error("Unrecognized weight type in PROFILER_LAYER_OUTPUT\n");
@@ -21169,25 +21289,40 @@ static void count_n_params(struct model_params * n_params, enum ggml_type dtype,
         case PROFILER_LAYER_BACKEND:
             switch (dtype) {
                 case GGML_TYPE_F32:
-                    n_params->layer_f32 += n_i64t;
+                    n_params->layer_f32     += n_i64t;
                     break;
                 case GGML_TYPE_F16:
-                    n_params->layer_f16 += n_i64t;
+                    n_params->layer_f16     += n_i64t;
+                    break;
+                case GGML_TYPE_Q2_K:
+                    n_params->layer_q2k     += n_i64t;
                     break;
                 case GGML_TYPE_Q4_K:
-                    n_params->layer_q4k += n_i64t;
-                    break;
-                case GGML_TYPE_Q5_0:
-                    n_params->layer_q50 += n_i64t;
+                    n_params->layer_q4k     += n_i64t;
                     break;
                 case GGML_TYPE_Q5_K:
-                    n_params->layer_q5k += n_i64t;
+                    n_params->layer_q5k     += n_i64t;
                     break;
                 case GGML_TYPE_Q6_K:
-                    n_params->layer_q6k += n_i64t;
+                    n_params->layer_q6k     += n_i64t;
+                    break;
+                case GGML_TYPE_IQ2_XXS:
+                    n_params->layer_iq2xxs  += n_i64t;
+                    break;
+                case GGML_TYPE_Q5_0:
+                    n_params->layer_q50     += n_i64t;
                     break;
                 case GGML_TYPE_Q8_0:
-                    n_params->layer_q80 += n_i64t;
+                    n_params->layer_q80     += n_i64t;
+                    break;
+                case GGML_TYPE_IQ1_S:
+                    n_params->layer_iq1s    += n_i64t;
+                    break;
+                case GGML_TYPE_IQ4_NL:
+                    n_params->layer_iq4nl   += n_i64t;
+                    break;
+                case GGML_TYPE_IQ1_M:
+                    n_params->layer_iq1m    += n_i64t;
                     break;
                 default:
                     throw std::runtime_error("Unrecognized weight type in PROFILER_LAYER_BACKEND\n");
@@ -21477,23 +21612,33 @@ void llama_model_n_flops(
     }
 
     // use average values instead of total values
-    n_flops->layer_f32_f32 = static_cast<int64_t>((double)n_flops->layer_f32_f32 / (double)n_layer);
-    n_flops->layer_f16_f32 = static_cast<int64_t>((double)n_flops->layer_f16_f32 / (double)n_layer);
-    n_flops->layer_q4k_f32 = static_cast<int64_t>((double)n_flops->layer_q4k_f32 / (double)n_layer);
-    n_flops->layer_q50_f32 = static_cast<int64_t>((double)n_flops->layer_q50_f32 / (double)n_layer);
-    n_flops->layer_q5k_f32 = static_cast<int64_t>((double)n_flops->layer_q5k_f32 / (double)n_layer);
-    n_flops->layer_q6k_f32 = static_cast<int64_t>((double)n_flops->layer_q6k_f32 / (double)n_layer);
-    n_flops->layer_q80_f32 = static_cast<int64_t>((double)n_flops->layer_q80_f32 / (double)n_layer);
-
-    n_params->layer_f32    = static_cast<int64_t>((double)n_params->layer_f32    / (double)n_layer);
-    n_params->layer_f16    = static_cast<int64_t>((double)n_params->layer_f16    / (double)n_layer);
-    n_params->layer_q4k    = static_cast<int64_t>((double)n_params->layer_q4k    / (double)n_layer);
-    n_params->layer_q50    = static_cast<int64_t>((double)n_params->layer_q50    / (double)n_layer);
-    n_params->layer_q5k    = static_cast<int64_t>((double)n_params->layer_q5k    / (double)n_layer);
-    n_params->layer_q6k    = static_cast<int64_t>((double)n_params->layer_q6k    / (double)n_layer);
-    n_params->layer_q80    = static_cast<int64_t>((double)n_params->layer_q80    / (double)n_layer);
-
-    n_bytes->nb_layer      = static_cast<int64_t>((double)n_bytes->nb_layer      / (double)n_layer);
+    n_flops->layer_f32_f32    = static_cast<int64_t>((double)n_flops->layer_f32_f32    / (double)n_layer);
+    n_flops->layer_f16_f32    = static_cast<int64_t>((double)n_flops->layer_f16_f32    / (double)n_layer);
+    n_flops->layer_q2k_f32    = static_cast<int64_t>((double)n_flops->layer_q2k_f32    / (double)n_layer);
+    n_flops->layer_q4k_f32    = static_cast<int64_t>((double)n_flops->layer_q4k_f32    / (double)n_layer);
+    n_flops->layer_q5k_f32    = static_cast<int64_t>((double)n_flops->layer_q5k_f32    / (double)n_layer);
+    n_flops->layer_q6k_f32    = static_cast<int64_t>((double)n_flops->layer_q6k_f32    / (double)n_layer);
+    n_flops->layer_iq2xxs_f32 = static_cast<int64_t>((double)n_flops->layer_iq2xxs_f32 / (double)n_layer);
+    n_flops->layer_q50_f32    = static_cast<int64_t>((double)n_flops->layer_q50_f32    / (double)n_layer);
+    n_flops->layer_q80_f32    = static_cast<int64_t>((double)n_flops->layer_q80_f32    / (double)n_layer);
+    n_flops->layer_iq1s_f32   = static_cast<int64_t>((double)n_flops->layer_iq1s_f32   / (double)n_layer);
+    n_flops->layer_iq4nl_f32  = static_cast<int64_t>((double)n_flops->layer_iq4nl_f32  / (double)n_layer);
+    n_flops->layer_iq1m_f32   = static_cast<int64_t>((double)n_flops->layer_iq1m_f32   / (double)n_layer);
+    
+    n_params->layer_f32      = static_cast<int64_t>((double)n_params->layer_f32     / (double)n_layer);
+    n_params->layer_f16      = static_cast<int64_t>((double)n_params->layer_f16     / (double)n_layer);
+    n_params->layer_q2k      = static_cast<int64_t>((double)n_params->layer_q2k     / (double)n_layer);
+    n_params->layer_q4k      = static_cast<int64_t>((double)n_params->layer_q4k     / (double)n_layer);
+    n_params->layer_q5k      = static_cast<int64_t>((double)n_params->layer_q5k     / (double)n_layer);
+    n_params->layer_q6k      = static_cast<int64_t>((double)n_params->layer_q6k     / (double)n_layer);
+    n_params->layer_iq2xxs   = static_cast<int64_t>((double)n_params->layer_iq2xxs  / (double)n_layer);
+    n_params->layer_q50      = static_cast<int64_t>((double)n_params->layer_q50     / (double)n_layer);
+    n_params->layer_q80      = static_cast<int64_t>((double)n_params->layer_q80     / (double)n_layer);
+    n_params->layer_iq1s     = static_cast<int64_t>((double)n_params->layer_iq1s    / (double)n_layer);
+    n_params->layer_iq4nl    = static_cast<int64_t>((double)n_params->layer_iq4nl   / (double)n_layer);
+    n_params->layer_iq1m     = static_cast<int64_t>((double)n_params->layer_iq1m    / (double)n_layer);
+    
+    n_bytes->nb_layer        = static_cast<int64_t>((double)n_bytes->nb_layer       / (double)n_layer);
 
     // reset ml, model, and clear contexts
     ml->n_created = 0;
