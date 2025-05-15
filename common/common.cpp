@@ -1547,7 +1547,7 @@ static bool tune_layer_allocation(
         dev_infos_temp.clear();
         n_layer_windows_temp.clear();
         n_gpu_layers_temp.clear();
-        for(auto i=0; i<n_world; i++) {
+        for(uint32_t i=0; i<n_world; i++) {
             if (n_layer_windows_[i] > 1 || i==0 ) {
                 dev_infos_temp.push_back(dev_infos_[i]);
                 n_layer_windows_temp.push_back(n_layer_windows_[i]);
@@ -1561,7 +1561,7 @@ static bool tune_layer_allocation(
 
         n_world = dev_infos_temp.size();
     }
-    int i =0 , j =0;
+    uint32_t i =0 , j =0;
     while(j < n_world) {
         if(dev_infos[i].rank == dev_infos_temp[j].rank){
             n_layer_window[i] = n_layer_windows_temp[j];
@@ -1701,13 +1701,19 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
                 llama_recv_layer_setup(lctx, n_layer_window, n_gpu_layers);
             }
         }
+        if(n_layer_window[my_rank]<=0){
+            LOG_INF("%s: info: rank %d has no layers to run, skipping\n", __func__, my_rank);
+            llama_free(lctx);
+            llama_free_model(model);
+            exit(0);
+        }
 
         //update rank and n_world for consistency
         uint32_t update_rank = 0;
         uint32_t update_n_world = 1;
         std::vector<uint32_t> n_layer_window_temp = {n_layer_window[0]};
         std::vector<uint32_t> n_gpu_layers_temp = {n_gpu_layers[0]};
-        for(auto i=1; i<n_world; i++) {
+        for(uint32_t i=1; i<n_world; i++) {
             if(n_layer_window[i] <= 0 ){
                 continue;
             }
@@ -1720,7 +1726,7 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
         }
         memset(n_layer_window, 0, n_world * sizeof(uint32_t));
         memset(n_gpu_layers, 0, n_world * sizeof(uint32_t));
-        for (auto i=0; i<update_n_world; i++) {
+        for (uint32_t i=0; i<update_n_world; i++) {
             n_layer_window[i] = n_layer_window_temp[i];
             n_gpu_layers[i] = n_gpu_layers_temp[i];
         }

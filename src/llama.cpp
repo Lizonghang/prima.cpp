@@ -20263,7 +20263,7 @@ int llama_send_device_info(struct llama_context * ctx, struct device_info * dev_
 }
 
 LLAMA_API int llama_bcast_startup_args(llama_context *ctx, uint32_t rank, startup_args *args) {
-    int32_t n_world = ctx->cparams.n_world;
+    auto n_world = ctx->cparams.n_world;
     if (n_world == 1) {
         return 0;
     }
@@ -20343,14 +20343,14 @@ LLAMA_API int llama_rebuild_topo(llama_context *ctx,
         }
         dev_info_ptr = new device_info[n_world];
         for (size_t i = 0; i < msgs.size(); i++) {
-            deserialize((const char *)msgs[i].data(), &dev_info_set[i]);
+            deserialize((const char *)msgs[i].data(), &dev_info_ptr[i]);
         }
     }else{
         char * buffer = nullptr;
         for(size_t i = 0; i < n_world; i++) {   
             size_t buffer_size = serialize(&dev_info_set[i], &buffer);
             msgs.emplace_back(buffer, buffer_size);
-
+            
             free(buffer);
         }
         dev_info_ptr = dev_info_set;
@@ -20361,9 +20361,9 @@ LLAMA_API int llama_rebuild_topo(llama_context *ctx,
 
     // notify next rank
     auto next_rank = (my_rank + 1) % n_world;
-    if(n_layer_window[next_rank] <= 0){
+    if(n_layer_window[next_rank] <= 0 && next_rank != 0){
         try {
-            ctx->send_socket->setsockopt(ZMQ_LINGER, 3500);
+            ctx->send_socket->set(zmq::sockopt::linger, 3500);
             zmq::send_multipart(*ctx->send_socket, msgs);
         } catch (const zmq::error_t& e) {
             LLAMA_LOG_INFO("Failed to send data: %s\n", e.what());
@@ -20382,7 +20382,7 @@ LLAMA_API int llama_rebuild_topo(llama_context *ctx,
         auto current_rank = my_rank;
         while(next_rank!=my_rank){
             if(n_layer_window[next_rank] > 0){
-                next_ip = dev_info_ptr[next_rank].next_ip;
+                next_ip = dev_info_ptr[current_rank].next_ip;
                 break;
             }
             next_rank = (next_rank + 1) % n_world;
@@ -20402,6 +20402,9 @@ LLAMA_API int llama_rebuild_topo(llama_context *ctx,
                 }
                 return -1;
             }
+        }else{
+            // only one node
+            ctx->next_node_ip = "";
         }
     }
     if(!dev_info_set){
@@ -20409,10 +20412,7 @@ LLAMA_API int llama_rebuild_topo(llama_context *ctx,
     }
     socket_to_close->close();
     delete socket_to_close;
-    if(n_layer_window[my_rank]<=0){
-        exit(0);
-    }
-    return true;
+    return 0;
 }
 
 int llama_recv_layer_setup(struct llama_context * ctx, uint32_t * n_layer_window, uint32_t * n_gpu_layers) {
