@@ -1702,6 +1702,30 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
             }
         }
 
+        //update rank and n_world for consistency
+        uint32_t update_rank = 0;
+        uint32_t update_n_world = 1;
+        std::vector<uint32_t> n_layer_window_temp = {n_layer_window[0]};
+        std::vector<uint32_t> n_gpu_layers_temp = {n_gpu_layers[0]};
+        for(auto i=1; i<n_world; i++) {
+            if(n_layer_window[i] <= 0 ){
+                continue;
+            }
+            if(i <= my_rank){
+                update_rank++;
+            }
+            update_n_world++;
+            n_layer_window_temp.push_back(n_layer_window[i]);
+            n_gpu_layers_temp.push_back(n_gpu_layers[i]);
+        }
+        memset(n_layer_window, 0, n_world * sizeof(uint32_t));
+        memset(n_gpu_layers, 0, n_world * sizeof(uint32_t));
+        for (auto i=0; i<update_n_world; i++) {
+            n_layer_window[i] = n_layer_window_temp[i];
+            n_gpu_layers[i] = n_gpu_layers_temp[i];
+        }
+        llama_update_context_with_rankworld(lctx, update_rank, update_n_world);
+
         // update n_layer_window and n_gpu_layers
         std::copy(std::begin(n_layer_window), std::end(n_layer_window), params.n_layer_window);
         std::copy(std::begin(n_layer_window), std::end(n_layer_window), cparams.n_layer_window);

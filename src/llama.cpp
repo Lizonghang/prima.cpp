@@ -20475,6 +20475,15 @@ void llama_free_sockets(struct llama_context * ctx, char ** msg) {
     }
 }
 
+void llama_update_context_with_rankworld(struct llama_context * ctx,
+                                                       uint32_t rank,
+                                                       uint32_t n_world) {
+    if(ctx) {
+        ctx->cparams.rank = rank;
+        ctx->cparams.n_world = n_world;
+    }
+}
+
 struct llama_context * llama_new_context_with_model(
                  struct llama_model * model,
         struct llama_context_params   params) {

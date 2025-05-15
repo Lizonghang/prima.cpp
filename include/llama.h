@@ -462,7 +462,11 @@ extern "C" {
               struct llama_model_loader * ml,
               struct llama_model        * model,
               struct llama_model_params   params);
-
+    
+    LLAMA_API void llama_update_context_with_rankworld(struct llama_context * ctx,
+                                                                     uint32_t rank,
+                                                                     uint32_t n_world);
+    
     LLAMA_API struct llama_context * llama_new_context_with_model(
                      struct llama_model * model,
             struct llama_context_params   params);
