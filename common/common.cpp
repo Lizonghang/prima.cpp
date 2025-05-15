@@ -1660,6 +1660,7 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
             // get device profile
             LOG_INF("\nstart profiling this device, this may take some seconds ...\n");
             dev_info.rank = params.rank;
+            dev_info.next_ip = params.next_node_ip.c_str();
             if (n_world > 1) {
                 llama_profile_device(&dev_info, model, ml, params.gpu_mem, params.n_predict, params.n_ctx, params.cpuparams.n_threads, params.flash_attn);
             }
@@ -1682,6 +1683,9 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
                     return iparams;
                 }
                 llama_bcast_layer_setup(lctx, n_layer_window, n_gpu_layers);
+
+                //rebuild topo
+                llama_rebuild_topo(lctx, n_layer_window, dev_info_set.data());
             } else {
                 // use the user-defined n_layer_window
                 std::copy(std::begin(params.n_layer_window), std::end(params.n_layer_window), n_layer_window);
@@ -1690,8 +1694,12 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
         } else {
             if (auto_schedule){
                 llama_send_device_info(lctx, &dev_info);
+                llama_recv_layer_setup(lctx, n_layer_window, n_gpu_layers);
+                // rebuild topo
+                llama_rebuild_topo(lctx,n_layer_window, nullptr);
+            }else{
+                llama_recv_layer_setup(lctx, n_layer_window, n_gpu_layers);
             }
-            llama_recv_layer_setup(lctx, n_layer_window, n_gpu_layers);
         }
 
         // update n_layer_window and n_gpu_layers

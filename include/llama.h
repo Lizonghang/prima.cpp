@@ -455,6 +455,7 @@ extern "C" {
     LLAMA_API int  llama_send_device_info  (struct llama_context * ctx, struct device_info * dev_info);
     LLAMA_API int  llama_bcast_startup_args(struct llama_context * ctx, uint32_t rank,  struct startup_args * args);
     LLAMA_API int  llama_bcast_layer_setup (struct llama_context * ctx, uint32_t * n_layer_window, uint32_t * n_gpu_layers);
+    LLAMA_API int  llama_rebuild_topo      (struct llama_context * ctx, uint32_t * n_layer_window, struct device_info * dev_info_set);
     LLAMA_API int  llama_recv_layer_setup  (struct llama_context * ctx, uint32_t * n_layer_window, uint32_t * n_gpu_layers);
 
     LLAMA_API int llm_load_tensors(
