@@ -320,6 +320,7 @@ struct device_info {
     uint32_t            rank;
     const char *        device_name;
     const char *        device_os;
+    const char *        next_ip;
     struct disk_props   disk;
     struct cpu_props    cpu_props;
     struct memory_info  memory;
@@ -333,6 +334,7 @@ struct device_info {
         rank(0), 
         device_name(""), 
         device_os(""),
+        next_ip(""),
         disk(),
         cpu_props(), 
         memory(), 

@@ -161,6 +161,19 @@ static void zeros(std::ofstream & file, size_t n) {
     }
 }
 
+// zmq helpers
+static std::vector<zmq::message_t> dev_infos_to_messages(const device_info* infos, 
+                                                                   uint32_t n_world){
+    std::vector<zmq::message_t> res;
+    for (uint32_t i = 0; i < n_world; ++i) {
+        char * buffer = nullptr;
+        size_t buffer_size = serialize(&infos[i], &buffer);
+        res.emplace_back(buffer, buffer_size);
+        free(buffer);
+    }
+    return res;
+}
+
 LLAMA_ATTRIBUTE_FORMAT(1, 2)
 static std::string format(const char * fmt, ...) {
     va_list ap;
@@ -2572,6 +2585,7 @@ static_assert(std::is_trivially_copyable<llama_hparams>::value, "llama_hparams m
 struct llama_cparams {
     uint32_t  n_world;
     uint32_t  rank;
+    uint32_t  original_next_rank; // original rank of the next node
     uint32_t  n_layer_window[32];
     bool      prefetch;
     bool      force;
@@ -20262,8 +20276,8 @@ int llama_send_device_info(struct llama_context * ctx, struct device_info * dev_
     return 0;
 }
 
-int llama_bcast_startup_args(llama_context * ctx, uint32_t rank, startup_args * args) {
-    int32_t n_world = ctx->cparams.n_world;
+LLAMA_API int llama_bcast_startup_args(llama_context *ctx, uint32_t rank, startup_args *args) {
+    auto n_world = ctx->cparams.n_world;
     if (n_world == 1) {
         return 0;
     }
@@ -20329,6 +20343,95 @@ int llama_bcast_layer_setup(struct llama_context * ctx, uint32_t * n_layer_windo
     return 0;
 }
 
+LLAMA_API int llama_rebuild_topo(llama_context *ctx,
+                                 uint32_t *n_layer_window,
+                                 device_info *dev_info_set) {
+    uint32_t n_world = ctx->cparams.n_world;
+    uint32_t my_rank = ctx->cparams.rank;
+    device_info* dev_info_ptr = nullptr;
+    if (dev_info_set == nullptr){
+        // for rank!=0, recv all devices info
+        std::vector<zmq::message_t> msgs;
+        if (!zmq::recv_multipart(*ctx->recv_socket, std::back_inserter(msgs))) {
+            return -1;
+        }
+        dev_info_ptr = new device_info[n_world];
+        for (size_t i = 0; i < msgs.size(); i++) {
+            deserialize((const char *)msgs[i].data(), &dev_info_ptr[i]);
+        }
+        GGML_ASSERT(msgs.size() == n_world);
+    }else{
+        dev_info_ptr = dev_info_set;
+    }
+
+    GGML_ASSERT(ctx != nullptr && ctx->send_socket != nullptr);
+
+    // notify next rank
+    auto next_rank = (my_rank + 1) % n_world;
+    if(n_layer_window[next_rank] <= 0 && next_rank != 0){
+        try {
+            auto msgs = dev_infos_to_messages(dev_info_ptr, n_world);
+            ctx->send_socket->set(zmq::sockopt::linger, 3500);
+            zmq::send_multipart(*ctx->send_socket, msgs);
+        } catch (const zmq::error_t& e) {
+            LLAMA_LOG_INFO("Failed to send data: %s\n", e.what());
+            if(!dev_info_set){
+                delete[] dev_info_ptr;
+            }
+            return -1;
+        }
+    }
+
+    // check myself's layer
+    zmq::socket_t* socket_to_close = nullptr;
+    if(n_layer_window[my_rank] > 0) {
+        // reconstruct socket to the next valid rank
+        std::string next_ip;
+        auto current_rank = my_rank;
+        while(next_rank!=my_rank){
+            if(n_layer_window[next_rank] > 0){
+                next_ip = dev_info_ptr[current_rank].next_ip;
+                break;
+            }
+            next_rank = (next_rank + 1) % n_world;
+            current_rank = (current_rank + 1) % n_world;
+        }
+        if(!next_ip.empty()){
+            if((my_rank+1)%n_world != next_rank){   
+                socket_to_close = ctx->send_socket;  
+                ctx->send_socket = new zmq::socket_t(*ctx->sock_context, zmq::socket_type::push);
+                std::string send_endp = "tcp://" + next_ip + ":" + std::to_string(map_rank_to_port(next_rank, ctx->data_port));
+                ctx->send_socket->connect(send_endp);
+                ctx->next_node_ip = next_ip;
+                ctx->cparams.original_next_rank = next_rank;
+            }
+            if(next_rank != 0){
+                try {
+                    auto msgs = dev_infos_to_messages(dev_info_ptr, n_world);
+                    zmq::send_multipart(*ctx->send_socket, msgs);
+                } catch (const zmq::error_t &e) {
+                    LLAMA_LOG_INFO("Error binding/connecting recv socket to endpoint: %s", e.what());
+                    if(!dev_info_set){
+                        delete[] dev_info_ptr;
+                    }
+                    return -1;
+                }
+            }
+        }else{
+            // only one node
+            ctx->next_node_ip = "";
+        }
+    }
+    if(!dev_info_set){
+        delete[] dev_info_ptr;
+    }
+    if(socket_to_close != nullptr){
+        socket_to_close->close();
+        delete socket_to_close;
+    }
+    return 0;
+}
+
 int llama_recv_layer_setup(struct llama_context * ctx, uint32_t * n_layer_window, uint32_t * n_gpu_layers) {
     uint32_t n_world = ctx->cparams.n_world;
     uint32_t my_rank = ctx->cparams.rank;
@@ -20363,7 +20466,8 @@ int llama_recv_layer_setup(struct llama_context * ctx, uint32_t * n_layer_window
 void llama_free_sockets(struct llama_context * ctx, char ** msg) {
     const uint32_t n_world   = ctx->cparams.n_world;
     const uint32_t my_rank   = ctx->cparams.rank;
-    const uint32_t next_rank = (my_rank + 1) % n_world;
+    // to adapt to the new topology, use old next_rank
+    const uint32_t next_rank = ctx->cparams.original_next_rank;
 
     if (n_world == 1) {
         return;
@@ -20389,6 +20493,15 @@ void llama_free_sockets(struct llama_context * ctx, char ** msg) {
     }
 }
 
+void llama_update_context_with_rankworld(struct llama_context * ctx,
+                                                       uint32_t rank,
+                                              uint32_t n_world) {
+    if(ctx) {
+        ctx->cparams.rank = rank;
+        ctx->cparams.n_world = n_world;
+    }
+}
+
 struct llama_context * llama_new_context_with_model(
                  struct llama_model * model,
         struct llama_context_params   params) {
@@ -20405,6 +20518,7 @@ struct llama_context * llama_new_context_with_model(
     ctx->cparams.n_world = params.n_world;
     ctx->cparams.rank    = params.rank;
     ctx->cparams.force   = params.force;
+    ctx->cparams.original_next_rank = (params.rank + 1) % params.n_world;
     return ctx;
 }
 
