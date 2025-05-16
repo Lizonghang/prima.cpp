@@ -1731,6 +1731,14 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
             n_gpu_layers[i] = n_gpu_layers_temp[i];
         }
         llama_update_context_with_rankworld(lctx, update_rank, update_n_world);
+        cparams.rank = update_rank;
+        cparams.n_world = update_n_world;
+        mparams.rank = update_rank;
+        mparams.n_world = update_n_world;
+        params.rank = update_rank;
+        params.n_world = update_n_world;
+        my_rank = update_rank;
+        n_world = update_n_world;
 
         // update n_layer_window and n_gpu_layers
         std::copy(std::begin(n_layer_window), std::end(n_layer_window), params.n_layer_window);

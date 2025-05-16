@@ -2585,6 +2585,7 @@ static_assert(std::is_trivially_copyable<llama_hparams>::value, "llama_hparams m
 struct llama_cparams {
     uint32_t  n_world;
     uint32_t  rank;
+    uint32_t  original_next_rank; // original rank of the next node
     uint32_t  n_layer_window[32];
     bool      prefetch;
     bool      force;
@@ -20399,6 +20400,7 @@ LLAMA_API int llama_rebuild_topo(llama_context *ctx,
             ctx->send_socket = new zmq::socket_t(*ctx->sock_context, zmq::socket_type::push);
             std::string send_endp = "tcp://" + next_ip + ":" + std::to_string(map_rank_to_port(next_rank, ctx->data_port));
             ctx->next_node_ip = next_ip;
+            ctx->cparams.original_next_rank = next_rank;
             try {
                 ctx->send_socket->connect(send_endp);
                 auto msgs = dev_infos_to_messages(dev_info_ptr, n_world);
@@ -20457,7 +20459,8 @@ int llama_recv_layer_setup(struct llama_context * ctx, uint32_t * n_layer_window
 void llama_free_sockets(struct llama_context * ctx, char ** msg) {
     const uint32_t n_world   = ctx->cparams.n_world;
     const uint32_t my_rank   = ctx->cparams.rank;
-    const uint32_t next_rank = (my_rank + 1) % n_world;
+    // to adapt to the new topology, use old next_rank
+    const uint32_t next_rank = ctx->cparams.original_next_rank;
 
     if (n_world == 1) {
         return;
@@ -20508,6 +20511,7 @@ struct llama_context * llama_new_context_with_model(
     ctx->cparams.n_world = params.n_world;
     ctx->cparams.rank    = params.rank;
     ctx->cparams.force   = params.force;
+    ctx->cparams.original_next_rank = (params.rank + 1) % params.n_world;
     return ctx;
 }
 
