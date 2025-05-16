@@ -1,5 +1,9 @@
 # Define the default target now so that it is always the first target
-BUILD_TARGETS = llama-cli profile-tool
+BUILD_TARGETS = \
+	llama-server \
+	llama-cli \
+	profile-tool
+
 # BUILD_TARGETS = \
 # 	libllava.a \
 # 	llama-baby-llama \

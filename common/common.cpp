@@ -1582,6 +1582,12 @@ static bool tune_layer_allocation(
 //
 
 struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
+
+#if !(defined(GGML_USE_METAL) || defined(GGML_USE_CUDA))
+    // reset n_gpu_layers to 0 if GPU is not used
+    params.n_gpu_layers  = 0;
+#endif
+
     llama_init_result iparams;
     auto mparams = llama_model_params_from_gpt_params(params);
 
@@ -1637,6 +1643,7 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
 
     if (n_world == 1) {
         uint32_t n_layers = llama_model_n_layers(model);
+        // assign all layers to this device
         params.n_layer_window[0]  = n_layers;
         cparams.n_layer_window[0] = n_layers;
         mparams.n_layer_window[0] = n_layers;
@@ -1649,7 +1656,7 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
 
         // broadcast startup args
         struct startup_args args;
-        if (my_rank==0){
+        if (my_rank == 0){
             args.should_profile = auto_schedule;
         }
         llama_bcast_startup_args(lctx, my_rank, &args);
