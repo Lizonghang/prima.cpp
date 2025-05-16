@@ -2358,15 +2358,17 @@ size_t serialize(const struct device_info * dev_info, char ** buffer) {
     // calculate total size for serialized buffer
     size_t device_name_len     = strlen(dev_info->device_name) + 1;
     size_t device_os_len       = strlen(dev_info->device_os) + 1;
+    size_t next_ip_len         = strlen(dev_info->next_ip) + 1;
     size_t cpu_name_len        = strlen(dev_info->cpu_props.name) + 1;
     size_t cpu_description_len = strlen(dev_info->cpu_props.description) + 1;
     size_t gpu_name_len        = strlen(dev_info->gpu_props.name) + 1;
     size_t gpu_description_len = strlen(dev_info->gpu_props.description) + 1;
 
     size_t total_size = sizeof(uint32_t)
-                      + sizeof(size_t) * 6  // for lengths of strings
+                      + sizeof(size_t) * 7  // for lengths of strings
                       + device_name_len
                       + device_os_len
+                      + next_ip_len
                       + cpu_name_len
                       + cpu_description_len
                       + gpu_name_len
@@ -2425,6 +2427,11 @@ size_t serialize(const struct device_info * dev_info, char ** buffer) {
     ptr += sizeof(size_t);
     memcpy(ptr, dev_info->device_os, device_os_len);
     ptr += device_os_len;
+
+    memcpy(ptr, &next_ip_len, sizeof(size_t));
+    ptr += sizeof(size_t);
+    memcpy(ptr, dev_info->next_ip, next_ip_len);
+    ptr += next_ip_len;
 
     memcpy(ptr, &cpu_name_len, sizeof(size_t));
     ptr += sizeof(size_t);
@@ -2610,6 +2617,14 @@ void deserialize(const char * buffer, struct device_info * dev_info) {
     dev_info->device_os = (char *)malloc(device_os_len);
     memcpy(const_cast<void*>(static_cast<const void*>(dev_info->device_os)), ptr, device_os_len);
     ptr += device_os_len;
+
+    // next ip
+    size_t next_ip_len;
+    memcpy(&next_ip_len, ptr, sizeof(size_t));
+    ptr += sizeof(size_t);
+    dev_info->next_ip = (char *)malloc(next_ip_len);
+    memcpy(const_cast<void*>(static_cast<const void*>(dev_info->next_ip)), ptr, next_ip_len);
+    ptr += next_ip_len;
 
     // cpu_props.name
     size_t cpu_name_len;
