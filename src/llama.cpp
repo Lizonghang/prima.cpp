@@ -121,6 +121,17 @@ struct Timer {
 // helpers
 //
 
+template<typename LocalFn, typename RemoteFn>
+bool kv_cache_op(bool        flag,
+                 LocalFn     local_fn,
+                 RemoteFn    remote_fn,
+                 bool        is_last_dev) {
+    if (!flag) return false;
+    local_fn();
+    if (!is_last_dev) remote_fn();
+    return true;
+}
+
 // trim whitespace from the beginning and end of a string
 static std::string trim(const std::string & str) {
     size_t start = 0;
@@ -159,6 +170,19 @@ static void zeros(std::ofstream & file, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         file.write(&zero, 1);
     }
+}
+
+// zmq helpers
+static std::vector<zmq::message_t> dev_infos_to_messages(const device_info* infos, 
+                                                                   uint32_t n_world){
+    std::vector<zmq::message_t> res;
+    for (uint32_t i = 0; i < n_world; ++i) {
+        char * buffer = nullptr;
+        size_t buffer_size = serialize(&infos[i], &buffer);
+        res.emplace_back(buffer, buffer_size);
+        free(buffer);
+    }
+    return res;
 }
 
 LLAMA_ATTRIBUTE_FORMAT(1, 2)
@@ -2572,6 +2596,7 @@ static_assert(std::is_trivially_copyable<llama_hparams>::value, "llama_hparams m
 struct llama_cparams {
     uint32_t  n_world;
     uint32_t  rank;
+    uint32_t  original_next_rank; // original rank of the next node
     uint32_t  n_layer_window[32];
     bool      prefetch;
     bool      force;
@@ -3560,16 +3585,26 @@ static bool is_dtype_exist(struct model_params * n_params, enum ggml_type dtype)
         case GGML_TYPE_F32:
         case GGML_TYPE_F16:    
             return true;
+        case GGML_TYPE_Q2_K:
+            return n_params->layer_q2k    > 0 || n_params->output_q2k    > 0;
         case GGML_TYPE_Q4_K:
-            return n_params->layer_q4k > 0 || n_params->output_q4k > 0;
-        case GGML_TYPE_Q5_0:
-            return n_params->layer_q50 > 0 || n_params->output_q50 > 0;
+            return n_params->layer_q4k    > 0 || n_params->output_q4k    > 0;
         case GGML_TYPE_Q5_K:
-            return n_params->layer_q5k > 0 || n_params->output_q5k > 0;
+            return n_params->layer_q5k    > 0 || n_params->output_q5k    > 0;
         case GGML_TYPE_Q6_K:
-            return n_params->layer_q6k > 0 || n_params->output_q6k > 0;
+            return n_params->layer_q6k    > 0 || n_params->output_q6k    > 0;
+        case GGML_TYPE_IQ2_XXS:
+            return n_params->layer_iq2xxs > 0 || n_params->output_iq2xxs > 0;
+        case GGML_TYPE_Q5_0:
+            return n_params->layer_q50    > 0 || n_params->output_q50    > 0;
         case GGML_TYPE_Q8_0:
-            return n_params->layer_q80 > 0 || n_params->output_q80 > 0;
+            return n_params->layer_q80    > 0 || n_params->output_q80    > 0;
+        case GGML_TYPE_IQ1_S:
+            return n_params->layer_iq1s   > 0 || n_params->output_iq1s   > 0;
+        case GGML_TYPE_IQ4_NL:
+            return n_params->layer_iq4nl  > 0 || n_params->output_iq4nl  > 0;
+        case GGML_TYPE_IQ1_M:
+            return n_params->layer_iq1m   > 0 || n_params->output_iq1m   > 0;
         default:
             throw std::runtime_error("Unrecognized data type\n");
     }
@@ -3639,45 +3674,76 @@ void llama_profile_device(
 #endif
 
     if (is_dtype_exist(n_params, GGML_TYPE_F32)) {
-        dev_info->cpu_props.flops_f32_f32       = device_cpu_flops  (model, GGML_TYPE_F32,  GGML_TYPE_F32, n_threads);
-        dev_info->gpu_props.metal_flops_f32_f32 = device_metal_flops(model, GGML_TYPE_F32,  GGML_TYPE_F32);
-        dev_info->gpu_props.cuda_flops_f32_f32  = device_cuda_flops (model, GGML_TYPE_F32,  GGML_TYPE_F32);
+        dev_info->cpu_props.flops_f32_f32         = device_cpu_flops  (model, GGML_TYPE_F32,  GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_f32_f32   = device_metal_flops(model, GGML_TYPE_F32,  GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_f32_f32    = device_cuda_flops (model, GGML_TYPE_F32,  GGML_TYPE_F32);
     }
 
     if (is_dtype_exist(n_params, GGML_TYPE_F16)) {
-        dev_info->cpu_props.flops_f16_f32       = device_cpu_flops  (model, GGML_TYPE_F16,  GGML_TYPE_F32, n_threads);
-        dev_info->gpu_props.metal_flops_f16_f32 = device_metal_flops(model, GGML_TYPE_F16,  GGML_TYPE_F32);
-        dev_info->gpu_props.cuda_flops_f16_f32  = device_cuda_flops (model, GGML_TYPE_F16,  GGML_TYPE_F32);
+        dev_info->cpu_props.flops_f16_f32         = device_cpu_flops  (model, GGML_TYPE_F16,  GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_f16_f32   = device_metal_flops(model, GGML_TYPE_F16,  GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_f16_f32    = device_cuda_flops (model, GGML_TYPE_F16,  GGML_TYPE_F32);
+    }
+
+    if (is_dtype_exist(n_params, GGML_TYPE_Q2_K)) {
+        dev_info->cpu_props.flops_q2k_f32         = device_cpu_flops  (model, GGML_TYPE_Q2_K, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_q2k_f32   = device_metal_flops(model, GGML_TYPE_Q2_K, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_q2k_f32    = device_cuda_flops (model, GGML_TYPE_Q2_K, GGML_TYPE_F32);
     }
 
     if (is_dtype_exist(n_params, GGML_TYPE_Q4_K)) {
-        dev_info->cpu_props.flops_q4k_f32       = device_cpu_flops  (model, GGML_TYPE_Q4_K, GGML_TYPE_F32, n_threads);
-        dev_info->gpu_props.metal_flops_q4k_f32 = device_metal_flops(model, GGML_TYPE_Q4_K, GGML_TYPE_F32);
-        dev_info->gpu_props.cuda_flops_q4k_f32  = device_cuda_flops (model, GGML_TYPE_Q4_K, GGML_TYPE_F32);
-    }
-
-    if (is_dtype_exist(n_params, GGML_TYPE_Q5_0)) {
-        dev_info->cpu_props.flops_q50_f32       = device_cpu_flops  (model, GGML_TYPE_Q5_0, GGML_TYPE_F32, n_threads);
-        dev_info->gpu_props.metal_flops_q50_f32 = device_metal_flops(model, GGML_TYPE_Q5_0, GGML_TYPE_F32);
-        dev_info->gpu_props.cuda_flops_q50_f32  = device_cuda_flops (model, GGML_TYPE_Q5_0, GGML_TYPE_F32);
+        dev_info->cpu_props.flops_q4k_f32         = device_cpu_flops  (model, GGML_TYPE_Q4_K, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_q4k_f32   = device_metal_flops(model, GGML_TYPE_Q4_K, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_q4k_f32    = device_cuda_flops (model, GGML_TYPE_Q4_K, GGML_TYPE_F32);
     }
 
     if (is_dtype_exist(n_params, GGML_TYPE_Q5_K)) {
-        dev_info->cpu_props.flops_q5k_f32       = device_cpu_flops  (model, GGML_TYPE_Q5_K, GGML_TYPE_F32, n_threads);
-        dev_info->gpu_props.metal_flops_q5k_f32 = device_metal_flops(model, GGML_TYPE_Q5_K, GGML_TYPE_F32);
-        dev_info->gpu_props.cuda_flops_q5k_f32  = device_cuda_flops (model, GGML_TYPE_Q5_K, GGML_TYPE_F32);
+        dev_info->cpu_props.flops_q5k_f32         = device_cpu_flops  (model, GGML_TYPE_Q5_K, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_q5k_f32   = device_metal_flops(model, GGML_TYPE_Q5_K, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_q5k_f32    = device_cuda_flops (model, GGML_TYPE_Q5_K, GGML_TYPE_F32);
     }
 
     if (is_dtype_exist(n_params, GGML_TYPE_Q6_K)) {
-        dev_info->cpu_props.flops_q6k_f32       = device_cpu_flops  (model, GGML_TYPE_Q6_K, GGML_TYPE_F32, n_threads);
-        dev_info->gpu_props.metal_flops_q6k_f32 = device_metal_flops(model, GGML_TYPE_Q6_K, GGML_TYPE_F32);
-        dev_info->gpu_props.cuda_flops_q6k_f32  = device_cuda_flops (model, GGML_TYPE_Q6_K, GGML_TYPE_F32);
+        dev_info->cpu_props.flops_q6k_f32         = device_cpu_flops  (model, GGML_TYPE_Q6_K, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_q6k_f32   = device_metal_flops(model, GGML_TYPE_Q6_K, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_q6k_f32    = device_cuda_flops (model, GGML_TYPE_Q6_K, GGML_TYPE_F32);
     }
 
+    if (is_dtype_exist(n_params, GGML_TYPE_IQ2_XXS)) {
+        dev_info->cpu_props.flops_iq2xxs_f32      = device_cpu_flops  (model, GGML_TYPE_IQ2_XXS, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_iq2xxs_f32= device_metal_flops(model, GGML_TYPE_IQ2_XXS, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_iq2xxs_f32 = device_cuda_flops (model, GGML_TYPE_IQ2_XXS, GGML_TYPE_F32);
+    }
+
+    if (is_dtype_exist(n_params, GGML_TYPE_Q5_0)) {
+        dev_info->cpu_props.flops_q50_f32         = device_cpu_flops  (model, GGML_TYPE_Q5_0, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_q50_f32   = device_metal_flops(model, GGML_TYPE_Q5_0, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_q50_f32    = device_cuda_flops (model, GGML_TYPE_Q5_0, GGML_TYPE_F32);
+    }
+
+
     if (is_dtype_exist(n_params, GGML_TYPE_Q8_0)) {
-        dev_info->cpu_props.flops_q80_f32       = device_cpu_flops  (model, GGML_TYPE_Q8_0, GGML_TYPE_F32, n_threads);
-        dev_info->gpu_props.metal_flops_q80_f32 = device_metal_flops(model, GGML_TYPE_Q8_0, GGML_TYPE_F32);
-        dev_info->gpu_props.cuda_flops_q80_f32  = device_cuda_flops (model, GGML_TYPE_Q8_0, GGML_TYPE_F32);
+        dev_info->cpu_props.flops_q80_f32         = device_cpu_flops  (model, GGML_TYPE_Q8_0, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_q80_f32   = device_metal_flops(model, GGML_TYPE_Q8_0, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_q80_f32    = device_cuda_flops (model, GGML_TYPE_Q8_0, GGML_TYPE_F32);
+    }
+
+    if (is_dtype_exist(n_params, GGML_TYPE_IQ1_S)) {
+        dev_info->cpu_props.flops_iq1s_f32        = device_cpu_flops  (model, GGML_TYPE_IQ1_S, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_iq1s_f32  = device_metal_flops(model, GGML_TYPE_IQ1_S, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_iq1s_f32   = device_cuda_flops (model, GGML_TYPE_IQ1_S, GGML_TYPE_F32);
+    }
+
+    if (is_dtype_exist(n_params, GGML_TYPE_IQ4_NL)) {
+        dev_info->cpu_props.flops_iq4nl_f32       = device_cpu_flops   (model, GGML_TYPE_IQ4_NL, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_iq4nl_f32 = device_metal_flops(model, GGML_TYPE_IQ4_NL, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_iq4nl_f32  = device_cuda_flops (model, GGML_TYPE_IQ4_NL, GGML_TYPE_F32);
+    }
+
+    if (is_dtype_exist(n_params, GGML_TYPE_IQ1_M)) {
+        dev_info->cpu_props.flops_iq1m_f32        = device_cpu_flops  (model, GGML_TYPE_IQ1_M, GGML_TYPE_F32, n_threads);
+        dev_info->gpu_props.metal_flops_iq1m_f32  = device_metal_flops(model, GGML_TYPE_IQ1_M, GGML_TYPE_F32);
+        dev_info->gpu_props.cuda_flops_iq1m_f32   = device_cuda_flops (model, GGML_TYPE_IQ1_M, GGML_TYPE_F32);
     }
 }
 
@@ -4116,7 +4182,7 @@ static bool llama_kv_cache_find_slot(
         }
 
         if (n_tested >= cache.size) {
-            //LLAMA_LOG_ERROR("%s: failed to find a slot for %d tokens\n", __func__, n_tokens);
+            LLAMA_LOG_ERROR("%s: failed to find a slot for %d tokens\n", __func__, n_tokens);
             return false;
         }
     }
@@ -4844,9 +4910,7 @@ struct llama_model_loader {
                 case GGML_TYPE_IQ4_NL:  ftype = LLAMA_FTYPE_MOSTLY_IQ4_NL;  break;
                 case GGML_TYPE_IQ4_XS:  ftype = LLAMA_FTYPE_MOSTLY_IQ4_XS;  break;
                 case GGML_TYPE_IQ3_S:   ftype = LLAMA_FTYPE_MOSTLY_IQ3_S;   break;
-                case GGML_TYPE_Q4_0_4_4: ftype = LLAMA_FTYPE_MOSTLY_Q4_0_4_4; break;
-                case GGML_TYPE_Q4_0_4_8: ftype = LLAMA_FTYPE_MOSTLY_Q4_0_4_8; break;
-                case GGML_TYPE_Q4_0_8_8: ftype = LLAMA_FTYPE_MOSTLY_Q4_0_8_8; break;
+
                 default:
                     {
                         LLAMA_LOG_WARN("%s: unknown type %s\n", __func__, ggml_type_name(type_max));
@@ -5654,9 +5718,6 @@ static std::string llama_model_ftype_name(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_IQ4_XS:   return "IQ4_XS - 4.25 bpw";
         case LLAMA_FTYPE_MOSTLY_IQ3_S:    return "IQ3_S - 3.4375 bpw";
         case LLAMA_FTYPE_MOSTLY_IQ3_M:    return "IQ3_S mix - 3.66 bpw";
-        case LLAMA_FTYPE_MOSTLY_Q4_0_4_4: return "Q4_0_4_4";
-        case LLAMA_FTYPE_MOSTLY_Q4_0_4_8: return "Q4_0_4_8";
-        case LLAMA_FTYPE_MOSTLY_Q4_0_8_8: return "Q4_0_8_8";
 
         default: return "unknown, may not work";
     }
@@ -7409,6 +7470,8 @@ static void llm_load_qwen2_tensors(
     const uint32_t     * n_layer_window,
     bool               * use_mmap_buffer,
     bool                 set_needed) {
+    (void)use_mmap_buffer; // unused in this function
+
     const auto tn = LLM_TN(model.arch);
 
     ggml_context * ctx_input        = nullptr;
@@ -7426,8 +7489,7 @@ static void llm_load_qwen2_tensors(
 
     const llama_hparams hparams = model.hparams;
     const int64_t n_embd        = hparams.n_embd;
-    const int64_t n_embd_gqa  = hparams.n_embd_v_gqa();
-    // const int64_t n_embd_gqa    = n_embd_v_gqa;
+    const int64_t n_embd_gqa    = hparams.n_embd_v_gqa();
     const int64_t n_ff          = hparams.n_ff();
     const int64_t n_vocab       = hparams.n_vocab;
     const int64_t n_layer       = hparams.n_layer;    
@@ -10593,7 +10655,7 @@ struct llm_build_context {
         cb(lctx.inp_K_shift, "K_shift", -1);
         ggml_set_input(lctx.inp_K_shift);
 
-        for (int il = 0; il < n_layer; ++il) {
+        for (int il = 0; il < (int)kv_self.k_l.size(); ++il) {
             const int64_t n_head_kv = hparams.n_head_kv(il);
             const int64_t n_embd_k_gqa = hparams.n_embd_k_gqa(il);
             struct ggml_tensor * rope_factors = build_rope_factors(il);
@@ -10606,13 +10668,19 @@ struct llm_build_context {
 
             struct ggml_tensor * tmp;
             if (ggml_is_quantized(k->type)) {
+
+#ifdef GGML_USE_METAL
+                GGML_ABORT("The option --cache-type-k is not supported on Metal\n");
+#endif
+
                 // dequantize to f32 -> RoPE -> quantize back
                 tmp = ggml_cast(ctx0, k, GGML_TYPE_F32);
                 cb(tmp, "K_f32", il);
+
                 for (auto * backend : lctx.backends) {
                     // Figure out which backend KV cache belongs to
                     if (ggml_backend_supports_buft(backend, lctx.model.buft_layer[il].buft)) {
-                        ggml_backend_sched_set_tensor_backend(lctx.sched.at(0), tmp, backend); // todo.
+                        ggml_backend_sched_set_tensor_backend(lctx.sched[0], tmp, backend);
                         break;
                     }
                 }
@@ -17733,7 +17801,41 @@ struct input_tensors {
 };
 
 struct sync_meta {
-    int32_t n_tokens = 0;
+    int32_t n_tokens           = 0;
+    llama_pos * pos            = nullptr;
+    llama_pos all_pos_0;
+    llama_pos all_pos_1;
+    uint32_t n_ctx             = 0;
+
+    // signal to clear the kv cache
+    bool clear_kv_cache        = false;
+
+    // signal to remove a kv cache sequence
+    bool kv_seq_rm             = false;
+    llama_seq_id rm_seq_id     = 0;
+    llama_pos    rm_p0         = 0;
+    llama_pos    rm_p1         = 0;
+
+    // signal to add a kv cache sequence
+    bool kv_seq_add            = false;
+    llama_seq_id add_seq_id    = 0;
+    llama_pos    add_p0        = 0;
+    llama_pos    add_p1        = 0;
+    llama_pos    add_delta     = 0;
+
+    // signal to copy a kv cache sequence
+    bool kv_seq_cp             = false;
+    llama_seq_id cp_src_seq_id = 0;
+    llama_seq_id cp_dst_seq_id = 0;
+    llama_pos    cp_p0         = 0;
+    llama_pos    cp_p1         = 0;
+
+    // signal to divide the kv cache range
+    bool kv_seq_div            = false;
+    llama_seq_id div_seq_id    = 0;
+    llama_pos    div_p0        = 0;
+    llama_pos    div_p1        = 0;
+    int          div_factor    = 1;
 };
 
 static void llama_send_meta(zmq::socket_t & socket, struct sync_meta * meta) {
@@ -17744,6 +17846,17 @@ static void llama_send_meta(zmq::socket_t & socket, struct sync_meta * meta) {
         GGML_ASSERT(meta->n_tokens != 0);
         send_msgs.emplace_back("n_tokens", strlen("n_tokens"));
         send_msgs.emplace_back(&(meta->n_tokens), sizeof(meta->n_tokens));
+
+        if (meta->pos != nullptr) {
+            send_msgs.emplace_back("pos", strlen("pos"));
+            send_msgs.emplace_back(meta->pos, meta->n_ctx * sizeof(llama_pos));
+        }
+
+        send_msgs.emplace_back("all_pos_0", strlen("all_pos_0"));
+        send_msgs.emplace_back(&(meta->all_pos_0), sizeof(meta->all_pos_0));
+
+        send_msgs.emplace_back("all_pos_1", strlen("all_pos_1"));
+        send_msgs.emplace_back(&(meta->all_pos_1), sizeof(meta->all_pos_1));
 
         zmq::send_multipart(socket, send_msgs);
     } catch (const zmq::error_t& e) {
@@ -17761,6 +17874,49 @@ static int llama_recv_meta(zmq::socket_t & socket, struct sync_meta * meta) {
 
     socket.set(zmq::sockopt::rcvtimeo, -1);
 
+    const std::string cmd = recv_msgs[0].to_string();
+    size_t idx = 1;
+
+    if (cmd == "clear_kv_cache" && recv_msgs.size() == 1) {
+        meta->clear_kv_cache = true;
+        return 0;
+    }
+
+    if (cmd == "kv_seq_rm" && recv_msgs.size() == 4) {
+        meta->kv_seq_rm = true;
+        std::memcpy(&meta->rm_seq_id,     recv_msgs[idx++].data(), sizeof(meta->rm_seq_id));
+        std::memcpy(&meta->rm_p0,         recv_msgs[idx++].data(), sizeof(meta->rm_p0));
+        std::memcpy(&meta->rm_p1,         recv_msgs[idx++].data(), sizeof(meta->rm_p1));
+        return 0;
+    }
+
+    if (cmd == "kv_seq_add" && recv_msgs.size() == 5) {
+        meta->kv_seq_add = true;
+        std::memcpy(&meta->add_seq_id,    recv_msgs[idx++].data(), sizeof(meta->add_seq_id));
+        std::memcpy(&meta->add_p0,        recv_msgs[idx++].data(), sizeof(meta->add_p0));
+        std::memcpy(&meta->add_p1,        recv_msgs[idx++].data(), sizeof(meta->add_p1));
+        std::memcpy(&meta->add_delta,     recv_msgs[idx++].data(), sizeof(meta->add_delta));
+        return 0;
+    }
+
+    if (cmd == "kv_seq_cp" && recv_msgs.size() == 5) {
+        meta->kv_seq_cp = true;
+        std::memcpy(&meta->cp_src_seq_id, recv_msgs[idx++].data(), sizeof(meta->cp_src_seq_id));
+        std::memcpy(&meta->cp_dst_seq_id, recv_msgs[idx++].data(), sizeof(meta->cp_dst_seq_id));
+        std::memcpy(&meta->cp_p0,         recv_msgs[idx++].data(), sizeof(meta->cp_p0));
+        std::memcpy(&meta->cp_p1,         recv_msgs[idx++].data(), sizeof(meta->cp_p1));
+        return 0;
+    }
+
+    if (cmd == "kv_seq_div" && recv_msgs.size() == 5) {
+        meta->kv_seq_div   = true;
+        std::memcpy(&meta->div_seq_id,    recv_msgs[idx++].data(), sizeof(meta->div_seq_id));
+        std::memcpy(&meta->div_p0,        recv_msgs[idx++].data(), sizeof(meta->div_p0));
+        std::memcpy(&meta->div_p1,        recv_msgs[idx++].data(), sizeof(meta->div_p1));
+        std::memcpy(&meta->div_factor,    recv_msgs[idx++].data(), sizeof(meta->div_factor));
+        return 0;
+    }
+
     for (size_t i = 0; i < recv_msgs.size(); i += 2) {
         std::string key           = recv_msgs[i].to_string();
         zmq::message_t & data_msg = recv_msgs[i + 1];
@@ -17768,6 +17924,21 @@ static int llama_recv_meta(zmq::socket_t & socket, struct sync_meta * meta) {
         if (key == "n_tokens") {
             GGML_ASSERT(data_msg.size() == sizeof(meta->n_tokens));
             std::memcpy(&(meta->n_tokens), data_msg.data(), sizeof(meta->n_tokens));
+        }
+
+        if (key == "pos") {
+            meta->pos = (llama_pos *) malloc(meta->n_ctx * sizeof(llama_pos));
+            std::memcpy(meta->pos, data_msg.data(), meta->n_ctx * sizeof(llama_pos));
+        }
+
+        if (key == "all_pos_0") {
+            GGML_ASSERT(data_msg.size() == sizeof(meta->all_pos_0));
+            std::memcpy(&(meta->all_pos_0), data_msg.data(), sizeof(meta->all_pos_0));
+        }
+
+        if (key == "all_pos_1") {
+            GGML_ASSERT(data_msg.size() == sizeof(meta->all_pos_1));
+            std::memcpy(&(meta->all_pos_1), data_msg.data(), sizeof(meta->all_pos_1));
         }
     }
     return 0;
@@ -18033,15 +18204,70 @@ static int llama_decode_internal(
     }
 
     sync_meta meta;
+    meta.n_ctx = cparams.n_ctx;
+    bool is_last_dev = (my_rank == n_world - 1);
+
     if (my_rank != 0) {
         if (llama_recv_meta(*lctx.recv_socket, &meta) == -1) {
             return -1;
         }
-        batch_all.n_tokens = meta.n_tokens;
+
+        if (meta.n_tokens > 0) {
+            batch_all.n_tokens = meta.n_tokens;
+            if (meta.pos != nullptr) {
+                batch_all.pos = (llama_pos *) malloc(cparams.n_ctx * sizeof(llama_pos));
+                std::memcpy(batch_all.pos, meta.pos, cparams.n_ctx * sizeof(llama_pos));
+            }
+            batch_all.all_pos_0 = meta.all_pos_0;
+            batch_all.all_pos_1 = meta.all_pos_1;
+        }
+
+        if (kv_cache_op(meta.clear_kv_cache,
+                    [&]{ llama_kv_cache_clear       (&lctx); },
+                    [&]{ llama_send_kv_cache_clear  (&lctx); },
+                    is_last_dev)) {
+            LLAMA_LOG_DEBUG("%s: received signal kv_cache_clear\n", __func__);
+            return -1;
+        }
+
+        if (kv_cache_op(meta.kv_seq_rm,
+                    [&]{ llama_kv_cache_seq_rm      (&lctx, meta.rm_seq_id, meta.rm_p0, meta.rm_p1); },
+                    [&]{ llama_send_kv_cache_seq_rm (&lctx, meta.rm_seq_id, meta.rm_p0, meta.rm_p1); },
+                    is_last_dev)) {
+            LLAMA_LOG_DEBUG("%s: received signal kv_cache_seq_rm\n", __func__);
+            return -1;
+        }
+
+        if (kv_cache_op(meta.kv_seq_add,
+                    [&]{ llama_kv_cache_seq_add     (&lctx, meta.add_seq_id, meta.add_p0, meta.add_p1, meta.add_delta); },
+                    [&]{ llama_send_kv_cache_seq_add(&lctx, meta.add_seq_id, meta.add_p0, meta.add_p1, meta.add_delta); },
+                    is_last_dev)) {
+            LLAMA_LOG_DEBUG("%s: received signal kv_cache_seq_add\n", __func__);
+            return -1;
+        }
+
+        if (kv_cache_op(meta.kv_seq_cp,
+                    [&]{ llama_kv_cache_seq_cp      (&lctx, meta.cp_src_seq_id, meta.cp_dst_seq_id, meta.cp_p0, meta.cp_p1); },
+                    [&]{ llama_send_kv_cache_seq_cp (&lctx, meta.cp_src_seq_id, meta.cp_dst_seq_id, meta.cp_p0, meta.cp_p1); },
+                    is_last_dev)) {
+            LLAMA_LOG_DEBUG("%s: received signal kv_cache_seq_cp\n", __func__);
+            return -1;
+        }
+
+        if (kv_cache_op(meta.kv_seq_div,
+                    [&]{ llama_kv_cache_seq_div     (&lctx, meta.div_seq_id, meta.div_p0, meta.div_p1, meta.div_factor); },
+                    [&]{ llama_send_kv_cache_seq_div(&lctx, meta.div_seq_id, meta.div_p0, meta.div_p1, meta.div_factor); },
+                    is_last_dev)) {
+            LLAMA_LOG_DEBUG("%s: received signal kv_cache_seq_div\n", __func__);
+            return -1;
+        }
     }
 
-    if (my_rank != n_world - 1) {
-        meta.n_tokens = batch_all.n_tokens;
+    if (!is_last_dev) {
+        meta.n_tokens  = batch_all.n_tokens;
+        meta.pos       = batch_all.pos;
+        meta.all_pos_0 = batch_all.all_pos_0;
+        meta.all_pos_1 = batch_all.all_pos_1;
         llama_send_meta(*lctx.send_socket, &meta);
     } 
     
@@ -18767,22 +18993,20 @@ static void llama_kv_cache_update_internal(struct llama_context & lctx) {
 
     // apply K-shift if needed
     if (lctx.model.hparams.rope_type != LLAMA_ROPE_TYPE_NONE && lctx.kv_self.has_shift) {
-        throw std::runtime_error("shift not supported\n");
-
         if (lctx.model.arch == LLM_ARCH_DEEPSEEK2) { // not supported due to MLA
             GGML_ABORT("Deepseek2 does not support K-shift");
         }
 
-        {
-            ggml_backend_sched_reset(lctx.sched.at(0)); // todo.
+        for (size_t i = 0; i < lctx.sched.size(); ++i) {
+            ggml_backend_sched_reset(lctx.sched[i]);
 
             ggml_cgraph * gf = llama_build_graph_k_shift(lctx);
 
-            ggml_backend_sched_alloc_graph(lctx.sched.at(0), gf); // todo.
+            ggml_backend_sched_alloc_graph(lctx.sched[i], gf);
 
             llama_set_k_shift(lctx);
 
-            llama_graph_compute(lctx, gf, lctx.sched.at(0), lctx.cparams.n_threads, lctx.threadpool); // todo.
+            llama_graph_compute(lctx, gf, lctx.sched[i], lctx.cparams.n_threads, lctx.threadpool);
 
             need_reserve = true;
         }
@@ -18809,8 +19033,6 @@ static void llama_kv_cache_update_internal(struct llama_context & lctx) {
 
     // reserve a worst case graph again
     if (need_reserve) {
-        throw std::runtime_error("reserve not supported\n");
-
         // TODO: extract to a function
         // build worst-case graph
         uint32_t n_seqs = 1; // TODO: worst-case number of sequences
@@ -18818,13 +19040,11 @@ static void llama_kv_cache_update_internal(struct llama_context & lctx) {
         llama_token token = llama_token_bos(&lctx.model); // not actually used by llama_build_graph, but required to choose between token and embedding inputs graph
         llama_ubatch ubatch = { true, n_tokens, n_tokens / n_seqs, n_seqs, &token, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
         std::vector<ggml_cgraph *> gf = llama_build_graph(lctx, ubatch, true);
-
-        // initialize scheduler with the worst-case graph
-        ggml_backend_sched_reset(lctx.sched[0]); // todo.
+        GGML_ASSERT(lctx.sched.size() == gf.size());
 
         bool ok = true;
-        GGML_ASSERT(lctx.sched.size() == gf.size());
         for (size_t i = 0; i < gf.size(); ++i) {
+            ggml_backend_sched_reset(lctx.sched[i]);
             ok = ok & ggml_backend_sched_reserve(lctx.sched[i], gf[i]);
         }
         if (!ok) {
@@ -18996,10 +19216,6 @@ static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type n
             }
             else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_XXS) {
                 new_type = GGML_TYPE_IQ3_S;
-            }
-            else if (new_type == GGML_TYPE_Q4_0_4_4 || new_type == GGML_TYPE_Q4_0_4_8 ||
-                     new_type == GGML_TYPE_Q4_0_8_8) {
-                new_type = GGML_TYPE_Q4_0;
             }
             else if (ftype == LLAMA_FTYPE_MOSTLY_TQ1_0 || ftype == LLAMA_FTYPE_MOSTLY_TQ2_0) {
                 new_type = GGML_TYPE_Q4_K;
@@ -19323,10 +19539,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         case LLAMA_FTYPE_MOSTLY_IQ4_XS:  default_type = GGML_TYPE_IQ4_XS;  break;
         case LLAMA_FTYPE_MOSTLY_IQ3_S:   default_type = GGML_TYPE_IQ3_S;   break;
         case LLAMA_FTYPE_MOSTLY_IQ3_M:   default_type = GGML_TYPE_IQ3_S;   break;
-        case LLAMA_FTYPE_MOSTLY_Q4_0_4_4: default_type = GGML_TYPE_Q4_0_4_4; break;
-        case LLAMA_FTYPE_MOSTLY_Q4_0_4_8: default_type = GGML_TYPE_Q4_0_4_8; break;
-        case LLAMA_FTYPE_MOSTLY_Q4_0_8_8: default_type = GGML_TYPE_Q4_0_8_8; break;
-
+        
         default: throw std::runtime_error(format("invalid output file type %d\n", ftype));
     }
 
@@ -19646,14 +19859,6 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
                 f32_data = (float *) f32_conv_buf.data();
             }
 
-            int chunk_size_multiplier = 1;
-            if (new_type == GGML_TYPE_Q4_0_4_4 || new_type == GGML_TYPE_Q4_0_4_8 || new_type == GGML_TYPE_Q4_0_8_8) {
-                if ((new_type == GGML_TYPE_Q4_0_8_8) && (tensor->ne[1] % 8 != 0)) new_type = GGML_TYPE_Q4_0;
-                else if (tensor->ne[1] % 4 != 0) new_type = GGML_TYPE_Q4_0;
-                if (new_type == GGML_TYPE_Q4_0_8_8) chunk_size_multiplier = 8;
-                else if (new_type == GGML_TYPE_Q4_0_4_4 || new_type == GGML_TYPE_Q4_0_4_8) chunk_size_multiplier = 4;
-            }
-
             LLAMA_LOG_INFO("converting to %s .. ", ggml_type_name(new_type));
             fflush(stdout);
 
@@ -19666,8 +19871,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
             const int64_t nrows = tensor->ne[1];
 
             static const int64_t min_chunk_size = 32 * 512;
-            const int64_t chunk_size = (n_per_row >= min_chunk_size ? n_per_row : n_per_row * ((min_chunk_size + n_per_row - 1)/n_per_row)) *
-                                       chunk_size_multiplier;
+            const int64_t chunk_size = (n_per_row >= min_chunk_size ? n_per_row : n_per_row * ((min_chunk_size + n_per_row - 1)/n_per_row));
 
             const int64_t nelements_matrix = tensor->ne[0] * tensor->ne[1];
             const int64_t nchunk = (nelements_matrix + chunk_size - 1)/chunk_size;
@@ -20181,6 +20385,8 @@ void llama_init_sockets(struct llama_context * ctx, uint32_t n_world, uint32_t m
         LLAMA_LOG_INFO("Error binding/connecting recv socket to endpoint: %s", e.what());
         exit(1);
     }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
 int llama_gather_device_info(struct llama_context * ctx, struct device_info * dev_info_set) {
@@ -20242,6 +20448,57 @@ int llama_send_device_info(struct llama_context * ctx, struct device_info * dev_
     return 0;
 }
 
+int llama_bcast_startup_args(llama_context * ctx, uint32_t rank, startup_args * args) {
+    int32_t n_world = ctx->cparams.n_world;
+    GGML_ASSERT(n_world > 0);
+    GGML_ASSERT(ctx != nullptr && ctx->send_socket != nullptr);
+
+    if (rank == 0){
+        // send
+        try {
+            std::vector<zmq::message_t> send_msgs;
+
+            send_msgs.emplace_back("should_profile", strlen("should_profile"));
+            send_msgs.emplace_back(&args->should_profile, sizeof(args->should_profile));
+
+            send_msgs.emplace_back("n_ctx", strlen("n_ctx"));
+            send_msgs.emplace_back(&args->n_ctx, sizeof(args->n_ctx));
+
+            zmq::send_multipart(*ctx->send_socket, send_msgs);
+        } catch (const zmq::error_t& e) {
+            LLAMA_LOG_INFO("Failed to send data: %s\n", e.what());
+            return -1;
+        }
+    } else {
+        // receive
+        std::vector<zmq::message_t> recv_msgs;
+        if (!zmq::recv_multipart(*ctx->recv_socket, std::back_inserter(recv_msgs))) {
+            return -1;
+        }
+
+        GGML_ASSERT(recv_msgs[0].to_string() == "should_profile");
+        GGML_ASSERT(recv_msgs[1].size() == sizeof(bool));
+        bool should_profile = *static_cast<bool*>(recv_msgs[1].data());
+        args->should_profile = should_profile;
+
+        GGML_ASSERT(recv_msgs[2].to_string() == "n_ctx");
+        GGML_ASSERT(recv_msgs[3].size() == sizeof(uint32_t));
+        uint32_t n_ctx = *static_cast<uint32_t*>(recv_msgs[3].data());        
+        args->n_ctx = n_ctx;
+
+        if ((int)rank != (int)n_world - 1){
+            // send
+            try {
+                zmq::send_multipart(*ctx->send_socket, recv_msgs);
+            } catch (const zmq::error_t & e) {
+                LLAMA_LOG_INFO("Failed to send data: %s\n", e.what());
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 int llama_bcast_layer_setup(struct llama_context * ctx, uint32_t * n_layer_window, uint32_t * n_gpu_layers) {
     uint32_t n_world = ctx->cparams.n_world;
     if (n_world == 1) {
@@ -20264,6 +20521,98 @@ int llama_bcast_layer_setup(struct llama_context * ctx, uint32_t * n_layer_windo
     } catch (const zmq::error_t& e) {
         LLAMA_LOG_INFO("Failed to send data: %s\n", e.what());
         return -1;
+    }
+
+    return 0;
+}
+
+int llama_rebuild_topo(llama_context * ctx, uint32_t * n_layer_window, device_info * dev_info_set) {
+    uint32_t n_world = ctx->cparams.n_world;
+    uint32_t my_rank = ctx->cparams.rank;
+    device_info * dev_info_ptr = nullptr;
+
+    if (dev_info_set == nullptr) {
+        std::vector<zmq::message_t> msgs;
+        if (!zmq::recv_multipart(*ctx->recv_socket, std::back_inserter(msgs))) {
+            return -1;
+        }
+        dev_info_ptr = new device_info[n_world];
+        for (size_t i = 0; i < msgs.size(); i++) {
+            deserialize((const char *)msgs[i].data(), &dev_info_ptr[i]);
+        }
+        GGML_ASSERT(msgs.size() == n_world);
+    } else {
+        dev_info_ptr = dev_info_set;
+    }
+
+    GGML_ASSERT(ctx != nullptr && ctx->send_socket != nullptr);
+
+    // notify next rank
+    auto next_rank = (my_rank + 1) % n_world;
+    if (n_layer_window[next_rank] <= 0 && next_rank != 0) {
+        try {
+            auto msgs = dev_infos_to_messages(dev_info_ptr, n_world);
+            ctx->send_socket->set(zmq::sockopt::linger, 3500);
+            zmq::send_multipart(*ctx->send_socket, msgs);
+        } catch (const zmq::error_t& e) {
+            LLAMA_LOG_INFO("Failed to send data: %s\n", e.what());
+            if(!dev_info_set){
+                delete[] dev_info_ptr;
+            }
+            return -1;
+        }
+    }
+
+    zmq::socket_t * socket_to_close = nullptr;
+    if (n_layer_window[my_rank] > 0) {
+        // reconstruct socket to the next valid rank
+        std::string next_ip;
+        auto current_rank = my_rank;
+
+        while (next_rank != my_rank) {
+            if (n_layer_window[next_rank] > 0) {
+                next_ip = dev_info_ptr[current_rank].next_ip;
+                break;
+            }
+            next_rank    = (next_rank    + 1) % n_world;
+            current_rank = (current_rank + 1) % n_world;
+        }
+
+        if (!next_ip.empty()) {
+            if ((my_rank + 1) % n_world != next_rank) {   
+                socket_to_close = ctx->send_socket;  
+                ctx->send_socket = new zmq::socket_t(*ctx->sock_context, zmq::socket_type::push);
+                std::string send_endp = "tcp://" + next_ip + ":" + std::to_string(map_rank_to_port(next_rank, ctx->data_port));
+                ctx->send_socket->connect(send_endp);
+                ctx->next_node_ip = next_ip;
+                ctx->cparams.original_next_rank = next_rank;
+            }
+
+            if (next_rank != 0) {
+                try {
+                    auto msgs = dev_infos_to_messages(dev_info_ptr, n_world);
+                    zmq::send_multipart(*ctx->send_socket, msgs);
+                } catch (const zmq::error_t &e) {
+                    LLAMA_LOG_INFO("Error binding/connecting recv socket to endpoint: %s", e.what());
+                    if(!dev_info_set){
+                        delete[] dev_info_ptr;
+                    }
+                    return -1;
+                }
+            }
+        } else {
+            // only one node
+            ctx->next_node_ip = "";
+        }
+    }
+
+    if (!dev_info_set) {
+        delete[] dev_info_ptr;
+    }
+
+    if(socket_to_close != nullptr){
+        socket_to_close->close();
+        delete socket_to_close;
     }
 
     return 0;
@@ -20303,7 +20652,8 @@ int llama_recv_layer_setup(struct llama_context * ctx, uint32_t * n_layer_window
 void llama_free_sockets(struct llama_context * ctx, char ** msg) {
     const uint32_t n_world   = ctx->cparams.n_world;
     const uint32_t my_rank   = ctx->cparams.rank;
-    const uint32_t next_rank = (my_rank + 1) % n_world;
+    // to adapt to the new topology, use old next_rank
+    const uint32_t next_rank = ctx->cparams.original_next_rank;
 
     if (n_world == 1) {
         return;
@@ -20329,6 +20679,13 @@ void llama_free_sockets(struct llama_context * ctx, char ** msg) {
     }
 }
 
+void llama_update_context_with_rankworld(struct llama_context * ctx, uint32_t rank, uint32_t n_world) {
+    if (ctx) {
+        ctx->cparams.rank    = rank;
+        ctx->cparams.n_world = n_world;
+    }
+}
+
 struct llama_context * llama_new_context_with_model(
                  struct llama_model * model,
         struct llama_context_params   params) {
@@ -20345,6 +20702,7 @@ struct llama_context * llama_new_context_with_model(
     ctx->cparams.n_world = params.n_world;
     ctx->cparams.rank    = params.rank;
     ctx->cparams.force   = params.force;
+    ctx->cparams.original_next_rank = (params.rank + 1) % params.n_world;
     return ctx;
 }
 
@@ -21049,25 +21407,40 @@ static void count_n_flops(struct model_flops * n_flops, enum ggml_type dtype, en
         case PROFILER_LAYER_OUTPUT:
             switch (dtype) {
                 case GGML_TYPE_F32:
-                    n_flops->output_f32_f32 += n;
+                    n_flops->output_f32_f32    += n;
                     break;
                 case GGML_TYPE_F16:
-                    n_flops->output_f16_f32 += n;
+                    n_flops->output_f16_f32    += n;
+                    break;
+                case GGML_TYPE_Q2_K:
+                    n_flops->output_q2k_f32    += n;
                     break;
                 case GGML_TYPE_Q4_K:
-                    n_flops->output_q4k_f32 += n;
-                    break;
-                case GGML_TYPE_Q5_0:
-                    n_flops->output_q50_f32 += n;
+                    n_flops->output_q4k_f32    += n;
                     break;
                 case GGML_TYPE_Q5_K:
-                    n_flops->output_q5k_f32 += n;
+                    n_flops->output_q5k_f32    += n;
                     break;
                 case GGML_TYPE_Q6_K:
-                    n_flops->output_q6k_f32 += n;
+                    n_flops->output_q6k_f32    += n;
+                    break;
+                case GGML_TYPE_IQ2_XXS:
+                    n_flops->output_iq2xxs_f32 += n;
+                    break;
+                case GGML_TYPE_Q5_0:
+                    n_flops->output_q50_f32    += n;
                     break;
                 case GGML_TYPE_Q8_0:
-                    n_flops->output_q80_f32 += n;
+                    n_flops->output_q80_f32    += n;
+                    break;
+                case GGML_TYPE_IQ1_S:
+                    n_flops->output_iq1s_f32   += n;
+                    break;
+                case GGML_TYPE_IQ4_NL:
+                    n_flops->output_iq4nl_f32  += n;
+                    break;
+                case GGML_TYPE_IQ1_M:
+                    n_flops->output_iq1m_f32   += n;
                     break;
                 default:
                     throw std::runtime_error("Unrecognized weight type in PROFILER_LAYER_OUTPUT\n");
@@ -21075,27 +21448,42 @@ static void count_n_flops(struct model_flops * n_flops, enum ggml_type dtype, en
             break;
 
         case PROFILER_LAYER_BACKEND:
-            switch (dtype) {
+              switch (dtype) {
                 case GGML_TYPE_F32:
-                    n_flops->layer_f32_f32 += n;
+                    n_flops->layer_f32_f32    += n;
                     break;
                 case GGML_TYPE_F16:
-                    n_flops->layer_f16_f32 += n;
+                    n_flops->layer_f16_f32    += n;
+                    break;
+                case GGML_TYPE_Q2_K:
+                    n_flops->layer_q2k_f32    += n;
                     break;
                 case GGML_TYPE_Q4_K:
-                    n_flops->layer_q4k_f32 += n;
-                    break;
-                case GGML_TYPE_Q5_0:
-                    n_flops->layer_q50_f32 += n;
+                    n_flops->layer_q4k_f32    += n;
                     break;
                 case GGML_TYPE_Q5_K:
-                    n_flops->layer_q5k_f32 += n;
+                    n_flops->layer_q5k_f32    += n;
                     break;
                 case GGML_TYPE_Q6_K:
-                    n_flops->layer_q6k_f32 += n;
+                    n_flops->layer_q6k_f32    += n;
+                    break;
+                case GGML_TYPE_IQ2_XXS:
+                    n_flops->layer_iq2xxs_f32 += n;
+                    break;
+                case GGML_TYPE_Q5_0:
+                    n_flops->layer_q50_f32    += n;
                     break;
                 case GGML_TYPE_Q8_0:
-                    n_flops->layer_q80_f32 += n;
+                    n_flops->layer_q80_f32    += n;
+                    break;
+                case GGML_TYPE_IQ1_S:
+                    n_flops->layer_iq1s_f32   += n;
+                    break;
+                case GGML_TYPE_IQ4_NL:
+                    n_flops->layer_iq4nl_f32  += n;
+                    break;
+                case GGML_TYPE_IQ1_M:
+                    n_flops->layer_iq1m_f32   += n;
                     break;
                 default:
                     throw std::runtime_error("Unrecognized weight type in PROFILER_LAYER_BACKEND\n");
@@ -21113,25 +21501,40 @@ static void count_n_params(struct model_params * n_params, enum ggml_type dtype,
         case PROFILER_LAYER_INPUT:
             switch (dtype) {
                 case GGML_TYPE_F32:
-                    n_params->input_f32 += n_i64t;
+                    n_params->input_f32    += n_i64t;
                     break;
                 case GGML_TYPE_F16:
-                    n_params->input_f16 += n_i64t;
+                    n_params->input_f16    += n_i64t;
+                    break;
+                case GGML_TYPE_Q2_K:
+                    n_params->input_q2k    += n_i64t;
                     break;
                 case GGML_TYPE_Q4_K:
-                    n_params->input_q4k += n_i64t;
-                    break;
-                case GGML_TYPE_Q5_0:
-                    n_params->input_q50 += n_i64t;
+                    n_params->input_q4k    += n_i64t;
                     break;
                 case GGML_TYPE_Q5_K:
-                    n_params->input_q5k += n_i64t;
+                    n_params->input_q5k    += n_i64t;
                     break;
                 case GGML_TYPE_Q6_K:
-                    n_params->input_q6k += n_i64t;
+                    n_params->input_q6k    += n_i64t;
+                    break;
+                case GGML_TYPE_IQ2_XXS:
+                    n_params->input_iq2xxs += n_i64t;
+                    break;
+                case GGML_TYPE_Q5_0:
+                    n_params->input_q50    += n_i64t;
                     break;
                 case GGML_TYPE_Q8_0:
-                    n_params->input_q80 += n_i64t;
+                    n_params->input_q80    += n_i64t;
+                    break;
+                case GGML_TYPE_IQ1_S:
+                    n_params->input_iq1s   += n_i64t;
+                    break;
+                case GGML_TYPE_IQ4_NL:
+                    n_params->input_iq4nl  += n_i64t;
+                    break;
+                case GGML_TYPE_IQ1_M:
+                    n_params->input_iq1m   += n_i64t;
                     break;
                 default:
                     throw std::runtime_error("Unrecognized weight type in PROFILER_LAYER_OUTPUT\n");
@@ -21141,25 +21544,40 @@ static void count_n_params(struct model_params * n_params, enum ggml_type dtype,
         case PROFILER_LAYER_OUTPUT:
             switch (dtype) {
                 case GGML_TYPE_F32:
-                    n_params->output_f32 += n_i64t;
+                    n_params->output_f32    += n_i64t;
                     break;
                 case GGML_TYPE_F16:
-                    n_params->output_f16 += n_i64t;
+                    n_params->output_f16    += n_i64t;
+                    break;
+                case GGML_TYPE_Q2_K:
+                    n_params->output_q2k    += n_i64t;
                     break;
                 case GGML_TYPE_Q4_K:
-                    n_params->output_q4k += n_i64t;
-                    break;
-                case GGML_TYPE_Q5_0:
-                    n_params->output_q50 += n_i64t;
+                    n_params->output_q4k    += n_i64t;
                     break;
                 case GGML_TYPE_Q5_K:
-                    n_params->output_q5k += n_i64t;
+                    n_params->output_q5k    += n_i64t;
                     break;
                 case GGML_TYPE_Q6_K:
-                    n_params->output_q6k += n_i64t;
+                    n_params->output_q6k    += n_i64t;
+                    break;
+                case GGML_TYPE_IQ2_XXS:
+                    n_params->output_iq2xxs += n_i64t;
+                    break;
+                case GGML_TYPE_Q5_0:
+                    n_params->output_q50    += n_i64t;
                     break;
                 case GGML_TYPE_Q8_0:
-                    n_params->output_q80 += n_i64t;
+                    n_params->output_q80    += n_i64t;
+                    break;
+                case GGML_TYPE_IQ1_S:
+                    n_params->output_iq1s   += n_i64t;
+                    break;
+                case GGML_TYPE_IQ4_NL:
+                    n_params->output_iq4nl  += n_i64t;
+                    break;
+                case GGML_TYPE_IQ1_M:
+                    n_params->output_iq1m   += n_i64t;
                     break;
                 default:
                     throw std::runtime_error("Unrecognized weight type in PROFILER_LAYER_OUTPUT\n");
@@ -21169,25 +21587,40 @@ static void count_n_params(struct model_params * n_params, enum ggml_type dtype,
         case PROFILER_LAYER_BACKEND:
             switch (dtype) {
                 case GGML_TYPE_F32:
-                    n_params->layer_f32 += n_i64t;
+                    n_params->layer_f32     += n_i64t;
                     break;
                 case GGML_TYPE_F16:
-                    n_params->layer_f16 += n_i64t;
+                    n_params->layer_f16     += n_i64t;
+                    break;
+                case GGML_TYPE_Q2_K:
+                    n_params->layer_q2k     += n_i64t;
                     break;
                 case GGML_TYPE_Q4_K:
-                    n_params->layer_q4k += n_i64t;
-                    break;
-                case GGML_TYPE_Q5_0:
-                    n_params->layer_q50 += n_i64t;
+                    n_params->layer_q4k     += n_i64t;
                     break;
                 case GGML_TYPE_Q5_K:
-                    n_params->layer_q5k += n_i64t;
+                    n_params->layer_q5k     += n_i64t;
                     break;
                 case GGML_TYPE_Q6_K:
-                    n_params->layer_q6k += n_i64t;
+                    n_params->layer_q6k     += n_i64t;
+                    break;
+                case GGML_TYPE_IQ2_XXS:
+                    n_params->layer_iq2xxs  += n_i64t;
+                    break;
+                case GGML_TYPE_Q5_0:
+                    n_params->layer_q50     += n_i64t;
                     break;
                 case GGML_TYPE_Q8_0:
-                    n_params->layer_q80 += n_i64t;
+                    n_params->layer_q80     += n_i64t;
+                    break;
+                case GGML_TYPE_IQ1_S:
+                    n_params->layer_iq1s    += n_i64t;
+                    break;
+                case GGML_TYPE_IQ4_NL:
+                    n_params->layer_iq4nl   += n_i64t;
+                    break;
+                case GGML_TYPE_IQ1_M:
+                    n_params->layer_iq1m    += n_i64t;
                     break;
                 default:
                     throw std::runtime_error("Unrecognized weight type in PROFILER_LAYER_BACKEND\n");
@@ -21477,23 +21910,33 @@ void llama_model_n_flops(
     }
 
     // use average values instead of total values
-    n_flops->layer_f32_f32 = static_cast<int64_t>((double)n_flops->layer_f32_f32 / (double)n_layer);
-    n_flops->layer_f16_f32 = static_cast<int64_t>((double)n_flops->layer_f16_f32 / (double)n_layer);
-    n_flops->layer_q4k_f32 = static_cast<int64_t>((double)n_flops->layer_q4k_f32 / (double)n_layer);
-    n_flops->layer_q50_f32 = static_cast<int64_t>((double)n_flops->layer_q50_f32 / (double)n_layer);
-    n_flops->layer_q5k_f32 = static_cast<int64_t>((double)n_flops->layer_q5k_f32 / (double)n_layer);
-    n_flops->layer_q6k_f32 = static_cast<int64_t>((double)n_flops->layer_q6k_f32 / (double)n_layer);
-    n_flops->layer_q80_f32 = static_cast<int64_t>((double)n_flops->layer_q80_f32 / (double)n_layer);
-
-    n_params->layer_f32    = static_cast<int64_t>((double)n_params->layer_f32    / (double)n_layer);
-    n_params->layer_f16    = static_cast<int64_t>((double)n_params->layer_f16    / (double)n_layer);
-    n_params->layer_q4k    = static_cast<int64_t>((double)n_params->layer_q4k    / (double)n_layer);
-    n_params->layer_q50    = static_cast<int64_t>((double)n_params->layer_q50    / (double)n_layer);
-    n_params->layer_q5k    = static_cast<int64_t>((double)n_params->layer_q5k    / (double)n_layer);
-    n_params->layer_q6k    = static_cast<int64_t>((double)n_params->layer_q6k    / (double)n_layer);
-    n_params->layer_q80    = static_cast<int64_t>((double)n_params->layer_q80    / (double)n_layer);
-
-    n_bytes->nb_layer      = static_cast<int64_t>((double)n_bytes->nb_layer      / (double)n_layer);
+    n_flops->layer_f32_f32    = static_cast<int64_t>((double)n_flops->layer_f32_f32    / (double)n_layer);
+    n_flops->layer_f16_f32    = static_cast<int64_t>((double)n_flops->layer_f16_f32    / (double)n_layer);
+    n_flops->layer_q2k_f32    = static_cast<int64_t>((double)n_flops->layer_q2k_f32    / (double)n_layer);
+    n_flops->layer_q4k_f32    = static_cast<int64_t>((double)n_flops->layer_q4k_f32    / (double)n_layer);
+    n_flops->layer_q5k_f32    = static_cast<int64_t>((double)n_flops->layer_q5k_f32    / (double)n_layer);
+    n_flops->layer_q6k_f32    = static_cast<int64_t>((double)n_flops->layer_q6k_f32    / (double)n_layer);
+    n_flops->layer_iq2xxs_f32 = static_cast<int64_t>((double)n_flops->layer_iq2xxs_f32 / (double)n_layer);
+    n_flops->layer_q50_f32    = static_cast<int64_t>((double)n_flops->layer_q50_f32    / (double)n_layer);
+    n_flops->layer_q80_f32    = static_cast<int64_t>((double)n_flops->layer_q80_f32    / (double)n_layer);
+    n_flops->layer_iq1s_f32   = static_cast<int64_t>((double)n_flops->layer_iq1s_f32   / (double)n_layer);
+    n_flops->layer_iq4nl_f32  = static_cast<int64_t>((double)n_flops->layer_iq4nl_f32  / (double)n_layer);
+    n_flops->layer_iq1m_f32   = static_cast<int64_t>((double)n_flops->layer_iq1m_f32   / (double)n_layer);
+    
+    n_params->layer_f32      = static_cast<int64_t>((double)n_params->layer_f32     / (double)n_layer);
+    n_params->layer_f16      = static_cast<int64_t>((double)n_params->layer_f16     / (double)n_layer);
+    n_params->layer_q2k      = static_cast<int64_t>((double)n_params->layer_q2k     / (double)n_layer);
+    n_params->layer_q4k      = static_cast<int64_t>((double)n_params->layer_q4k     / (double)n_layer);
+    n_params->layer_q5k      = static_cast<int64_t>((double)n_params->layer_q5k     / (double)n_layer);
+    n_params->layer_q6k      = static_cast<int64_t>((double)n_params->layer_q6k     / (double)n_layer);
+    n_params->layer_iq2xxs   = static_cast<int64_t>((double)n_params->layer_iq2xxs  / (double)n_layer);
+    n_params->layer_q50      = static_cast<int64_t>((double)n_params->layer_q50     / (double)n_layer);
+    n_params->layer_q80      = static_cast<int64_t>((double)n_params->layer_q80     / (double)n_layer);
+    n_params->layer_iq1s     = static_cast<int64_t>((double)n_params->layer_iq1s    / (double)n_layer);
+    n_params->layer_iq4nl    = static_cast<int64_t>((double)n_params->layer_iq4nl   / (double)n_layer);
+    n_params->layer_iq1m     = static_cast<int64_t>((double)n_params->layer_iq1m    / (double)n_layer);
+    
+    n_bytes->nb_layer        = static_cast<int64_t>((double)n_bytes->nb_layer       / (double)n_layer);
 
     // reset ml, model, and clear contexts
     ml->n_created = 0;
@@ -21765,8 +22208,40 @@ void llama_kv_cache_clear(struct llama_context * ctx) {
     llama_kv_cache_clear(ctx->kv_self);
 }
 
+void llama_send_kv_cache_clear(struct llama_context * ctx) {
+    if (ctx->send_socket == nullptr) {
+        return;
+    }
+    
+    try {
+        std::vector<zmq::message_t> send_msgs;
+        const char * cmd = "clear_kv_cache";
+        send_msgs.emplace_back(cmd, strlen(cmd));
+        zmq::send_multipart(*ctx->send_socket, send_msgs);
+    } catch (const zmq::error_t & e) {
+        LLAMA_LOG_INFO("Failed to send KV cache clear signal: %s\n", e.what());
+    }
+}
+
 bool llama_kv_cache_seq_rm(struct llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     return llama_kv_cache_seq_rm(ctx->kv_self, seq_id, p0, p1);
+}
+
+void llama_send_kv_cache_seq_rm(struct llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    if (ctx->send_socket == nullptr) {
+        return;
+    }
+
+    try {
+        std::vector<zmq::message_t> msgs;
+        msgs.emplace_back("kv_seq_rm", strlen("kv_seq_rm"));
+        msgs.emplace_back(&seq_id, sizeof(seq_id));
+        msgs.emplace_back(&p0,     sizeof(p0));
+        msgs.emplace_back(&p1,     sizeof(p1));
+        zmq::send_multipart(*ctx->send_socket, msgs);
+    } catch (const zmq::error_t & e) {
+        LLAMA_LOG_WARN("Failed to send kv_seq_rm: %s\n", e.what());
+    }
 }
 
 void llama_kv_cache_seq_cp(struct llama_context * ctx, llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
@@ -21774,6 +22249,24 @@ void llama_kv_cache_seq_cp(struct llama_context * ctx, llama_seq_id seq_id_src, 
         return;
     }
     llama_kv_cache_seq_cp(ctx->kv_self, seq_id_src, seq_id_dst, p0, p1);
+}
+
+void llama_send_kv_cache_seq_cp(struct llama_context * ctx, llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
+    if (ctx->send_socket == nullptr) {
+        return;
+    }
+
+    try {
+        std::vector<zmq::message_t> msgs;
+        msgs.emplace_back("kv_seq_cp", strlen("kv_seq_cp"));
+        msgs.emplace_back(&seq_id_src, sizeof(seq_id_src));
+        msgs.emplace_back(&seq_id_dst, sizeof(seq_id_dst));
+        msgs.emplace_back(&p0,         sizeof(p0));
+        msgs.emplace_back(&p1,         sizeof(p1));
+        zmq::send_multipart(*ctx->send_socket, msgs);
+    } catch (const zmq::error_t & e) {
+        LLAMA_LOG_WARN("Failed to send kv_seq_cp: %s\n", e.what());
+    }
 }
 
 void llama_kv_cache_seq_keep(struct llama_context * ctx, llama_seq_id seq_id) {
@@ -21788,12 +22281,48 @@ void llama_kv_cache_seq_add(struct llama_context * ctx, llama_seq_id seq_id, lla
     llama_kv_cache_seq_add(ctx->kv_self, seq_id, p0, p1, delta);
 }
 
+void llama_send_kv_cache_seq_add(struct llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos delta) {
+    if (ctx->send_socket == nullptr) {
+        return;
+    }
+    
+    try {
+        std::vector<zmq::message_t> msgs;
+        msgs.emplace_back("kv_seq_add", strlen("kv_seq_add"));
+        msgs.emplace_back(&seq_id, sizeof(seq_id));
+        msgs.emplace_back(&p0,     sizeof(p0));
+        msgs.emplace_back(&p1,     sizeof(p1));
+        msgs.emplace_back(&delta,  sizeof(delta));
+        zmq::send_multipart(*ctx->send_socket, msgs);
+    } catch (const zmq::error_t & e) {
+        LLAMA_LOG_WARN("Failed to send kv_seq_add: %s\n", e.what());
+    }
+}
+
 void llama_kv_cache_seq_div(struct llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1, int d) {
     if (d == 1) {
         return;
     }
 
     llama_kv_cache_seq_div(ctx->kv_self, seq_id, p0, p1, d);
+}
+
+void llama_send_kv_cache_seq_div(struct llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1, int d) {
+    if (ctx->send_socket == nullptr) {
+        return;
+    }
+
+    try {
+        std::vector<zmq::message_t> msgs;
+        msgs.emplace_back("kv_seq_div", strlen("kv_seq_div"));
+        msgs.emplace_back(&seq_id, sizeof(seq_id));
+        msgs.emplace_back(&p0,     sizeof(p0));
+        msgs.emplace_back(&p1,     sizeof(p1));
+        msgs.emplace_back(&d,      sizeof(d));
+        zmq::send_multipart(*ctx->send_socket, msgs);
+    } catch (const zmq::error_t & e) {
+        LLAMA_LOG_WARN("Failed to send kv_seq_div: %s\n", e.what());
+    }
 }
 
 llama_pos llama_kv_cache_seq_pos_max(struct llama_context * ctx, llama_seq_id seq_id) {

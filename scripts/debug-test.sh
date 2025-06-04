@@ -127,7 +127,7 @@ printf "\n\nGathering tests that fit REGEX: ${test_suite} ...\n"
 pushd "$build_dir"
 tests=($(ctest -R ${test_suite} -V -N | grep -E " +Test +#[0-9]+*" | cut -d':' -f2 | awk '{$1=$1};1'))
 if [ ${#tests[@]} -eq 0 ]; then
-    abort "No tests avaliable... check your compliation process..."
+    abort "No tests avaliable... check your compilation process..."
 fi
 popd > /dev/null || exit 1
 

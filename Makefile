@@ -1,5 +1,9 @@
 # Define the default target now so that it is always the first target
-BUILD_TARGETS = llama-cli
+BUILD_TARGETS = \
+	llama-server \
+	llama-cli \
+	profile-tool
+
 # BUILD_TARGETS = \
 # 	libllava.a \
 # 	llama-baby-llama \
@@ -268,7 +272,7 @@ MK_LDFLAGS  += -L/usr/local/lib -lzmq
 
 ifeq ($(UNAME_S),Darwin)
     MK_CPPFLAGS += -isystem /opt/homebrew/include
-    MK_LDFLAGS  += -L/opt/homebrew/lib -lzmq
+    MK_LDFLAGS  += -L/opt/homebrew/lib
 endif
 
 ifeq ($(USE_HIGHS),1)
@@ -276,7 +280,7 @@ ifeq ($(USE_HIGHS),1)
 	HIGHS_LDFLAGS  = -L/usr/local/lib -lhighs
 	ifeq ($(UNAME_S),Darwin)
         HIGHS_CPPFLAGS += -isystem /opt/homebrew/include/highs
-        HIGHS_LDFLAGS  += -L/opt/homebrew/lib -lhighs
+        HIGHS_LDFLAGS  += -L/opt/homebrew/lib
 	endif
 	MK_CPPFLAGS += $(HIGHS_CPPFLAGS) -DUSE_HIGHS
 	MK_LDFLAGS  += $(HIGHS_LDFLAGS)
@@ -1527,6 +1531,11 @@ llama-minicpmv-cli: examples/llava/minicpmv-cli.cpp \
 	examples/llava/clip.h \
 	$(OBJ_ALL)
 	$(CXX) $(CXXFLAGS) $< $(filter-out %.h $<,$^) -o $@ $(LDFLAGS) -Wno-cast-qual
+
+profile-tool: tools/profile_tool.cpp \
+	$(OBJ_ALL)
+	$(CXX) $(CXXFLAGS) -c $< -o $(call GET_OBJ_FILE, $<)
+	$(CXX) $(CXXFLAGS) $(filter-out %.h $<,$^) $(call GET_OBJ_FILE, $<) -o $@ $(LDFLAGS)
 
 ifeq ($(UNAME_S),Darwin)
 swift: examples/batched.swift

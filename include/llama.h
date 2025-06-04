@@ -165,18 +165,18 @@ extern "C" {
         LLAMA_FTYPE_MOSTLY_Q2_K_S        = 21, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ3_XS        = 22, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ3_XXS       = 23, // except 1d tensors
-        LLAMA_FTYPE_MOSTLY_IQ1_S         = 24, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_IQ1_S         = 24, // except 1d tensors, 1 bit quantization
         LLAMA_FTYPE_MOSTLY_IQ4_NL        = 25, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ3_S         = 26, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ3_M         = 27, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ2_S         = 28, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ2_M         = 29, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_IQ4_XS        = 30, // except 1d tensors
-        LLAMA_FTYPE_MOSTLY_IQ1_M         = 31, // except 1d tensors
+        LLAMA_FTYPE_MOSTLY_IQ1_M         = 31, // except 1d tensors, 1 bit quantization
         LLAMA_FTYPE_MOSTLY_BF16          = 32, // except 1d tensors
-        LLAMA_FTYPE_MOSTLY_Q4_0_4_4      = 33, // except 1d tensors
-        LLAMA_FTYPE_MOSTLY_Q4_0_4_8      = 34, // except 1d tensors
-        LLAMA_FTYPE_MOSTLY_Q4_0_8_8      = 35, // except 1d tensors
+        // LLAMA_FTYPE_MOSTLY_Q4_0_4_4      = 33, // removed from gguf files, use Q4_0 and runtime repack
+        // LLAMA_FTYPE_MOSTLY_Q4_0_4_8      = 34, // removed from gguf files, use Q4_0 and runtime repack
+        // LLAMA_FTYPE_MOSTLY_Q4_0_8_8      = 35, // removed from gguf files, use Q4_0 and runtime repack
         LLAMA_FTYPE_MOSTLY_TQ1_0         = 36, // except 1d tensors
         LLAMA_FTYPE_MOSTLY_TQ2_0         = 37, // except 1d tensors
 
@@ -283,7 +283,7 @@ extern "C" {
         uint32_t n_world; // number of nodes
         uint32_t rank; // my node rank
         uint32_t n_layer_window[32]; // number of layers to kept each time
-        int32_t n_gpu_layers; // number of layers to store in VRAM
+        int32_t  n_gpu_layers; // number of layers to store in VRAM
         enum llama_split_mode split_mode; // how to split the model across multiple GPUs
 
         // main_gpu interpretation depends on split_mode:
@@ -453,14 +453,21 @@ extern "C" {
     LLAMA_API void llama_free_sockets      (struct llama_context * ctx, char ** msg);
     LLAMA_API int  llama_gather_device_info(struct llama_context * ctx, struct device_info * dev_info_set);
     LLAMA_API int  llama_send_device_info  (struct llama_context * ctx, struct device_info * dev_info);
+    LLAMA_API int  llama_bcast_startup_args(struct llama_context * ctx, uint32_t rank, struct startup_args * args);
     LLAMA_API int  llama_bcast_layer_setup (struct llama_context * ctx, uint32_t * n_layer_window, uint32_t * n_gpu_layers);
+    LLAMA_API int  llama_rebuild_topo      (struct llama_context * ctx, uint32_t * n_layer_window, struct device_info * dev_info_set);
     LLAMA_API int  llama_recv_layer_setup  (struct llama_context * ctx, uint32_t * n_layer_window, uint32_t * n_gpu_layers);
 
     LLAMA_API int llm_load_tensors(
               struct llama_model_loader * ml,
               struct llama_model        * model,
               struct llama_model_params   params);
-
+    
+    LLAMA_API void llama_update_context_with_rankworld(
+                   struct llama_context * ctx, 
+                               uint32_t   rank, 
+                               uint32_t   n_world);
+    
     LLAMA_API struct llama_context * llama_new_context_with_model(
                      struct llama_model * model,
             struct llama_context_params   params);
@@ -706,8 +713,10 @@ extern "C" {
     LLAMA_API int32_t llama_get_kv_cache_used_cells(const struct llama_context * ctx);
 
     // Clear the KV cache - both cell info is erased and KV data is zeroed
-    LLAMA_API void llama_kv_cache_clear(
-            struct llama_context * ctx);
+    LLAMA_API void llama_kv_cache_clear(struct llama_context * ctx);
+
+    // Notify other devices to clear their KV cache
+    LLAMA_API void llama_send_kv_cache_clear(struct llama_context * ctx);
 
     // Removes all tokens that belong to the specified sequence and have positions in [p0, p1)
     // Returns false if a partial sequence cannot be removed. Removing a whole sequence never fails
@@ -719,12 +728,27 @@ extern "C" {
                     llama_seq_id   seq_id,
                        llama_pos   p0,
                        llama_pos   p1);
+    
+    // Notify other nodes to remove a range from their KV cache
+    LLAMA_API void llama_send_kv_cache_seq_rm(
+            struct llama_context * ctx, 
+                    llama_seq_id   seq_id, 
+                       llama_pos   p0, 
+                       llama_pos   p1);
 
     // Copy all tokens that belong to the specified sequence to another sequence
     // Note that this does not allocate extra KV cache memory - it simply assigns the tokens to the new sequence
     // p0 < 0 : [0,  p1]
     // p1 < 0 : [p0, inf)
     LLAMA_API void llama_kv_cache_seq_cp(
+            struct llama_context * ctx,
+                    llama_seq_id   seq_id_src,
+                    llama_seq_id   seq_id_dst,
+                       llama_pos   p0,
+                       llama_pos   p1);
+    
+    // Notify other nodes to copy a range of KV entries 
+    LLAMA_API void llama_send_kv_cache_seq_cp(
             struct llama_context * ctx,
                     llama_seq_id   seq_id_src,
                     llama_seq_id   seq_id_dst,
@@ -749,6 +773,14 @@ extern "C" {
                        llama_pos   p1,
                        llama_pos   delta);
 
+    // Notify other nodes to shift (add) their KV cache entries
+    LLAMA_API void llama_send_kv_cache_seq_add(
+            struct llama_context * ctx,
+                    llama_seq_id   seq_id,
+                       llama_pos   p0,
+                       llama_pos   p1,
+                       llama_pos   delta);
+
     // Integer division of the positions by factor of `d > 1`
     // If the KV cache is RoPEd, the KV data is updated accordingly:
     //   - lazily on next llama_decode()
@@ -756,6 +788,14 @@ extern "C" {
     // p0 < 0 : [0,  p1]
     // p1 < 0 : [p0, inf)
     LLAMA_API void llama_kv_cache_seq_div(
+            struct llama_context * ctx,
+                    llama_seq_id   seq_id,
+                       llama_pos   p0,
+                       llama_pos   p1,
+                             int   d);
+    
+    // Notify other nodes to perform a division operation on a KV cache range
+    LLAMA_API void llama_send_kv_cache_seq_div(
             struct llama_context * ctx,
                     llama_seq_id   seq_id,
                        llama_pos   p0,

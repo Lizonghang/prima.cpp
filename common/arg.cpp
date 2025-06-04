@@ -986,13 +986,13 @@ gpt_params_context gpt_params_parser_init(gpt_params & params, llama_example ex,
             params.enable_chat_template = false;
         }
     ).set_examples({LLAMA_EXAMPLE_MAIN, LLAMA_EXAMPLE_INFILL}));
-    add_opt(llama_arg(
-        {"--no-warmup"},
-        "skip warming up the model with an empty run",
-        [](gpt_params & params) {
-            params.warmup = false;
-        }
-    ).set_examples({LLAMA_EXAMPLE_MAIN}));
+    // add_opt(llama_arg(
+    //     {"--no-warmup"},
+    //     "skip warming up the model with an empty run",
+    //     [](gpt_params & params) {
+    //         params.warmup = false;
+    //     }
+    // ).set_examples({LLAMA_EXAMPLE_MAIN}));
     add_opt(llama_arg(
         {"--spm-infill"},
         format(
@@ -1317,6 +1317,12 @@ gpt_params_context gpt_params_parser_init(gpt_params & params, llama_example ex,
         {"-ctk", "--cache-type-k"}, "TYPE",
         format("KV cache data type for K (default: %s)", params.cache_type_k.c_str()),
         [](gpt_params & params, const std::string & value) {
+
+#ifdef GGML_USE_METAL
+            LOG_WRN("The option -ctk or --cache-type-k is not supported on Metal, use default type\n");
+            return;
+#endif
+
             // TODO: get the type right here
             params.cache_type_k = value;
         }
@@ -1325,6 +1331,11 @@ gpt_params_context gpt_params_parser_init(gpt_params & params, llama_example ex,
         {"-ctv", "--cache-type-v"}, "TYPE",
         format("KV cache data type for V (default: %s)", params.cache_type_v.c_str()),
         [](gpt_params & params, const std::string & value) {
+#ifdef GGML_USE_METAL
+            LOG_WRN("The option -ctv or --cache-type-v is not supported on Metal, use default type\n");
+            return;
+#endif
+
             // TODO: get the type right here
             params.cache_type_v = value;
         }
@@ -1413,13 +1424,13 @@ gpt_params_context gpt_params_parser_init(gpt_params & params, llama_example ex,
             params.defrag_thold = std::stof(value);
         }
     ).set_env("LLAMA_ARG_DEFRAG_THOLD"));
-    add_opt(llama_arg(
-        {"-np", "--parallel"}, "N",
-        format("number of parallel sequences to decode (default: %d)", params.n_parallel),
-        [](gpt_params & params, int value) {
-            params.n_parallel = value;
-        }
-    ).set_env("LLAMA_ARG_N_PARALLEL"));
+    // add_opt(llama_arg(
+    //     {"-np", "--parallel"}, "N",
+    //     format("number of parallel sequences to decode (default: %d)", params.n_parallel),
+    //     [](gpt_params & params, int value) {
+    //         params.n_parallel = value;
+    //     }
+    // ).set_env("LLAMA_ARG_N_PARALLEL"));
     add_opt(llama_arg(
         {"-ns", "--sequences"}, "N",
         format("number of sequences to decode (default: %d)", params.n_sequences),

@@ -48,6 +48,16 @@
 #include <dirent.h>
 
 
+static int gcd_int(int a, int b) {
+    while (b != 0) {
+        int t = b;
+        b = a % b;
+        a = t;
+    }
+    return a;
+}
+
+
 static size_t get_page_size() {
     size_t page_size = 0;
 
@@ -154,8 +164,25 @@ uint32_t device_cpu_cores() {
 
 static float device_flops(struct llama_model * model, enum ggml_type src0t, enum ggml_type src1t, enum profiler_backend_type btype, int n_threads) {
     int n_repeat = 1;
-    int n_embd = std::min(llama_n_embd(model), 4096);
-    if (btype == PROFILER_BACKEND_TYPE_CPU) n_embd /= 8; // simulate small tensor calculation on cpu
+    int n_embd   = std::min(llama_n_embd(model), 4096);
+
+    // simulate small tensor calculation on cpu
+    if (btype == PROFILER_BACKEND_TYPE_CPU) n_embd /= 8;
+
+    // ensure that the block sizes of the tensors are compatible
+    int bs0 = ggml_blck_size(src0t);
+    int bs1 = ggml_blck_size(src1t);
+    int gcd = gcd_int(bs0, bs1);
+    int lcm = bs0 / gcd * bs1;
+
+    if (n_embd % bs0 != 0 || n_embd % bs1 != 0) {
+        if (n_embd < lcm) {
+            n_embd = 2 * lcm;
+        } else {
+            n_embd = 2 * (n_embd / lcm) * lcm;
+        }
+    }
+
     std::vector<float> matrix_A(n_embd * n_embd, 1.0f); 
     std::vector<float> matrix_B(n_embd * n_embd, 1.0f / n_embd);
 
@@ -208,10 +235,12 @@ static float device_flops(struct llama_model * model, enum ggml_type src0t, enum
         ctx_cgraph = ggml_init(params0);
 
         gf = ggml_new_graph(ctx_cgraph);
+        
         cur = ggml_mul_mat(ctx_cgraph, tensor_a, tensor_b);
         for (int i = 0; i < n_repeat - 1; i++) {
             cur = ggml_mul_mat(ctx_cgraph, tensor_a, cur);
         }
+
         ggml_build_forward_expand(gf, cur);
     }
 
@@ -345,7 +374,6 @@ float device_inp_embd_delay(struct llama_model * model, enum ggml_type src0t, in
         return 0.0f;
     }
 
-    size_t QK_K = 0; 
     switch (src0t) {
         case GGML_TYPE_F32: {
             matrix_B = malloc(embd_size * sizeof(float));
@@ -364,14 +392,18 @@ float device_inp_embd_delay(struct llama_model * model, enum ggml_type src0t, in
             ggml_fp32_to_fp16_row(temp_f32.data(), static_cast<ggml_fp16_t *>(matrix_B), embd_size);
             break;
         }
+        case GGML_TYPE_Q2_K:
         case GGML_TYPE_Q4_K:
-        case GGML_TYPE_Q5_0:
         case GGML_TYPE_Q5_K:
         case GGML_TYPE_Q6_K:
         case GGML_TYPE_Q8_K:
+        case GGML_TYPE_IQ2_XXS:
+        case GGML_TYPE_Q5_0:
         case GGML_TYPE_Q8_0:
-            QK_K = ggml_blck_size(src0t);
-            matrix_B = malloc((embd_size / QK_K) * ggml_type_size(src0t));
+        case GGML_TYPE_IQ1_S:
+        case GGML_TYPE_IQ4_NL:
+        case GGML_TYPE_IQ1_M:
+            matrix_B = malloc((embd_size / ggml_blck_size(src0t) * ggml_type_size(src0t))); // The quantization block sizes are inconsistent for different quantization methods
             break;
         default:
             LOG_INF("Unsupported type: %d\n", src0t);
@@ -407,7 +439,7 @@ float device_inp_embd_delay(struct llama_model * model, enum ggml_type src0t, in
     }
 
     // warm-up
-    // ggml_backend_graph_compute(backend, gf);
+    ggml_backend_graph_compute(backend, gf);
 
     const int64_t t_start = ggml_time_us();
     ggml_backend_graph_compute(backend, gf);
@@ -905,7 +937,7 @@ ioengine=%s
 direct=1
 time_based=1
 runtime=1
-size=4G
+size=1G
 group_reporting=1
 iodepth=1
 
@@ -1256,6 +1288,9 @@ static float device_mem_copy(struct llama_model * model, enum profiler_backend_t
         ggml_backend_cpu_set_n_threads(backend, n_threads);
     }
 
+    // warm-up 
+    ggml_backend_graph_compute(backend, gf);
+
     const int64_t t_start = ggml_time_us();
     ggml_backend_graph_compute(backend, gf);
     const int64_t t_end = ggml_time_us();
@@ -1347,33 +1382,47 @@ static float device_compute_delay(struct device_info & dev_info, int n_layers, c
 #ifdef GGML_USE_CUDA
     struct gpu_props gpu = dev_info.gpu_props;
 
-    gpu_latency_per_layer += (double)n_flops.layer_f32_f32  / ((double)gpu.cuda_flops_f32_f32 + EPS) / 1e9;
-    gpu_latency_per_layer += (double)n_flops.layer_f16_f32  / ((double)gpu.cuda_flops_f16_f32 + EPS) / 1e9;
-    gpu_latency_per_layer += (double)n_flops.layer_q4k_f32  / ((double)gpu.cuda_flops_q4k_f32 + EPS) / 1e9;
-    gpu_latency_per_layer += (double)n_flops.layer_q50_f32  / ((double)gpu.cuda_flops_q50_f32 + EPS) / 1e9;
-    gpu_latency_per_layer += (double)n_flops.layer_q5k_f32  / ((double)gpu.cuda_flops_q5k_f32 + EPS) / 1e9;
-    gpu_latency_per_layer += (double)n_flops.layer_q6k_f32  / ((double)gpu.cuda_flops_q6k_f32 + EPS) / 1e9;
-    gpu_latency_per_layer += (double)n_flops.layer_q80_f32  / ((double)gpu.cuda_flops_q80_f32 + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_f32_f32    / ((double)gpu.cuda_flops_f32_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_f16_f32    / ((double)gpu.cuda_flops_f16_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_q2k_f32    / ((double)gpu.cuda_flops_q2k_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_q4k_f32    / ((double)gpu.cuda_flops_q4k_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_q5k_f32    / ((double)gpu.cuda_flops_q5k_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_q6k_f32    / ((double)gpu.cuda_flops_q6k_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_iq2xxs_f32 / ((double)gpu.cuda_flops_iq2xxs_f32 + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_q50_f32    / ((double)gpu.cuda_flops_q50_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_q80_f32    / ((double)gpu.cuda_flops_q80_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_iq1s_f32   / ((double)gpu.cuda_flops_iq1s_f32   + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_iq4nl_f32  / ((double)gpu.cuda_flops_iq4nl_f32  + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_iq1m_f32   / ((double)gpu.cuda_flops_iq1m_f32   + EPS) / 1e9;
 #elif GGML_USE_METAL
     struct gpu_props gpu = dev_info.gpu_props;
 
-    gpu_latency_per_layer += (double)n_flops.layer_f32_f32  / ((double)gpu.metal_flops_f32_f32 + EPS) / 1e9;
-    gpu_latency_per_layer += (double)n_flops.layer_f16_f32  / ((double)gpu.metal_flops_f16_f32 + EPS) / 1e9;
-    gpu_latency_per_layer += (double)n_flops.layer_q4k_f32  / ((double)gpu.metal_flops_q4k_f32 + EPS) / 1e9;
-    gpu_latency_per_layer += (double)n_flops.layer_q50_f32  / ((double)gpu.metal_flops_q50_f32 + EPS) / 1e9;
-    gpu_latency_per_layer += (double)n_flops.layer_q5k_f32  / ((double)gpu.metal_flops_q5k_f32 + EPS) / 1e9;
-    gpu_latency_per_layer += (double)n_flops.layer_q6k_f32  / ((double)gpu.metal_flops_q6k_f32 + EPS) / 1e9;
-    gpu_latency_per_layer += (double)n_flops.layer_q80_f32  / ((double)gpu.metal_flops_q80_f32 + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_f32_f32    / ((double)gpu.metal_flops_f32_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_f16_f32    / ((double)gpu.metal_flops_f16_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_q2k_f32    / ((double)gpu.metal_flops_q2k_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_q4k_f32    / ((double)gpu.metal_flops_q4k_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_q5k_f32    / ((double)gpu.metal_flops_q5k_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_q6k_f32    / ((double)gpu.metal_flops_q6k_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_iq2xxs_f32 / ((double)gpu.metal_flops_iq2xxs_f32 + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_q50_f32    / ((double)gpu.metal_flops_q50_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_q80_f32    / ((double)gpu.metal_flops_q80_f32    + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_iq1s_f32   / ((double)gpu.metal_flops_iq1s_f32   + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_iq4nl_f32  / ((double)gpu.metal_flops_iq4nl_f32  + EPS) / 1e9;
+    gpu_latency_per_layer += (double)n_flops.layer_iq1m_f32   / ((double)gpu.metal_flops_iq1m_f32   + EPS) / 1e9;
 #endif
 
-    cpu_latency_per_layer += (double)n_flops.layer_f32_f32  / ((double)cpu.flops_f32_f32 + EPS) / 1e9;
-    cpu_latency_per_layer += (double)n_flops.layer_f16_f32  / ((double)cpu.flops_f16_f32 + EPS) / 1e9;
-    cpu_latency_per_layer += (double)n_flops.layer_q4k_f32  / ((double)cpu.flops_q4k_f32 + EPS) / 1e9;
-    cpu_latency_per_layer += (double)n_flops.layer_q50_f32  / ((double)cpu.flops_q50_f32 + EPS) / 1e9;
-    cpu_latency_per_layer += (double)n_flops.layer_q5k_f32  / ((double)cpu.flops_q5k_f32 + EPS) / 1e9;
-    cpu_latency_per_layer += (double)n_flops.layer_q6k_f32  / ((double)cpu.flops_q6k_f32 + EPS) / 1e9;
-    cpu_latency_per_layer += (double)n_flops.layer_q80_f32  / ((double)cpu.flops_q80_f32 + EPS) / 1e9;
-
+    cpu_latency_per_layer += (double)n_flops.layer_f32_f32    / ((double)cpu.flops_f32_f32    + EPS) / 1e9;
+    cpu_latency_per_layer += (double)n_flops.layer_f16_f32    / ((double)cpu.flops_f16_f32    + EPS) / 1e9;
+    cpu_latency_per_layer += (double)n_flops.layer_q2k_f32    / ((double)cpu.flops_q2k_f32    + EPS) / 1e9;
+    cpu_latency_per_layer += (double)n_flops.layer_q4k_f32    / ((double)cpu.flops_q4k_f32    + EPS) / 1e9;
+    cpu_latency_per_layer += (double)n_flops.layer_q5k_f32    / ((double)cpu.flops_q5k_f32    + EPS) / 1e9;
+    cpu_latency_per_layer += (double)n_flops.layer_q6k_f32    / ((double)cpu.flops_q6k_f32    + EPS) / 1e9;
+    cpu_latency_per_layer += (double)n_flops.layer_iq2xxs_f32 / ((double)cpu.flops_iq2xxs_f32 + EPS) / 1e9;
+    cpu_latency_per_layer += (double)n_flops.layer_q50_f32    / ((double)cpu.flops_q50_f32    + EPS) / 1e9;
+    cpu_latency_per_layer += (double)n_flops.layer_q80_f32    / ((double)cpu.flops_q80_f32    + EPS) / 1e9;
+    cpu_latency_per_layer += (double)n_flops.layer_iq1s_f32   / ((double)cpu.flops_iq1s_f32   + EPS) / 1e9;
+    cpu_latency_per_layer += (double)n_flops.layer_iq4nl_f32  / ((double)cpu.flops_iq4nl_f32  + EPS) / 1e9;
+    cpu_latency_per_layer += (double)n_flops.layer_iq1m_f32   / ((double)cpu.flops_iq1m_f32   + EPS) / 1e9;
     double total_latency = 0.0f;
     
 #if defined(GGML_USE_METAL) || defined(GGML_USE_CUDA)
@@ -1385,13 +1434,18 @@ static float device_compute_delay(struct device_info & dev_info, int n_layers, c
     total_latency += cpu_latency_per_layer * n_layers;
 #endif
 
-    total_latency += (double)n_flops.output_f32_f32 / ((double)cpu.flops_f32_f32 + EPS) / 1e9;
-    total_latency += (double)n_flops.output_f16_f32 / ((double)cpu.flops_f16_f32 + EPS) / 1e9;
-    total_latency += (double)n_flops.output_q4k_f32 / ((double)cpu.flops_q4k_f32 + EPS) / 1e9;
-    total_latency += (double)n_flops.output_q50_f32 / ((double)cpu.flops_q50_f32 + EPS) / 1e9;
-    total_latency += (double)n_flops.output_q5k_f32 / ((double)cpu.flops_q5k_f32 + EPS) / 1e9;
-    total_latency += (double)n_flops.output_q6k_f32 / ((double)cpu.flops_q6k_f32 + EPS) / 1e9;
-    total_latency += (double)n_flops.output_q80_f32 / ((double)cpu.flops_q80_f32 + EPS) / 1e9;
+    total_latency += (double)n_flops.output_f32_f32    / ((double)cpu.flops_f32_f32    + EPS) / 1e9;
+    total_latency += (double)n_flops.output_f16_f32    / ((double)cpu.flops_f16_f32    + EPS) / 1e9;
+    total_latency += (double)n_flops.output_q2k_f32    / ((double)cpu.flops_q2k_f32    + EPS) / 1e9;
+    total_latency += (double)n_flops.output_q4k_f32    / ((double)cpu.flops_q4k_f32    + EPS) / 1e9;
+    total_latency += (double)n_flops.output_q5k_f32    / ((double)cpu.flops_q5k_f32    + EPS) / 1e9;
+    total_latency += (double)n_flops.output_q6k_f32    / ((double)cpu.flops_q6k_f32    + EPS) / 1e9;
+    total_latency += (double)n_flops.output_iq2xxs_f32 / ((double)cpu.flops_iq2xxs_f32 + EPS) / 1e9;
+    total_latency += (double)n_flops.output_q50_f32    / ((double)cpu.flops_q50_f32    + EPS) / 1e9;
+    total_latency += (double)n_flops.output_q80_f32    / ((double)cpu.flops_q80_f32    + EPS) / 1e9;
+    total_latency += (double)n_flops.output_iq1s_f32   / ((double)cpu.flops_iq1s_f32   + EPS) / 1e9;
+    total_latency += (double)n_flops.output_iq4nl_f32  / ((double)cpu.flops_iq4nl_f32  + EPS) / 1e9;
+    total_latency += (double)n_flops.output_iq1m_f32   / ((double)cpu.flops_iq1m_f32   + EPS) / 1e9;
 
     total_latency *= 1000; // convert to ms
 
@@ -1647,474 +1701,664 @@ static float device_mem_copy_delay(struct device_info & dev_info, struct llama_m
 
 void device_print_props(struct device_info * dev_info_set, int n, struct llama_model * model, const struct llama_context_params cparams) {
     LOG_INF("\n-------------------------------------------------------------------------------------------\n");
-    LOG_INF("| Property                     ");
+    LOG_INF("| Property                        ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| Rank %-8d", i);
         GGML_ASSERT((int)dev_info_set[i].rank == i);
     }
     LOG_INF("\n-------------------------------------------------------------------------------------------\n");
 
-    LOG_INF("| Device Name                  ");
+    LOG_INF("| Device Name                     ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.10s   ", dev_info_set[i].device_name);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Device OS                    ");
+    LOG_INF("| Device OS                       ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.10s   ", dev_info_set[i].device_os);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CPU Name                     ");
+    LOG_INF("| CPU Name                        ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.10s   ", dev_info_set[i].cpu_props.name);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CPU Description              ");
+    LOG_INF("| CPU Description                 ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.10s   ", dev_info_set[i].cpu_props.description);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Number of CPU cores          ");
+    LOG_INF("| Number of CPU cores             ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10u   ", dev_info_set[i].cpu_props.cores);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CPU flops (F32xF32, GFLOPS)  ");
+    LOG_INF("| CPU flops (F32xF32, GFLOPS)     ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].cpu_props.flops_f32_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CPU flops (F16xF32, GFLOPS)  ");
+    LOG_INF("| CPU flops (F16xF32, GFLOPS)     ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].cpu_props.flops_f16_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CPU flops (Q4K x F32, GFLOPS)");
+    LOG_INF("| CPU flops (Q2K x F32, GFLOPS)   ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].cpu_props.flops_q2k_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| CPU flops (Q4K x F32, GFLOPS)   ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].cpu_props.flops_q4k_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CPU flops (Q50 x F32, GFLOPS)");
-    for (int i = 0; i < n; ++i) {
-        LOG_INF("| %-10.1f   ", dev_info_set[i].cpu_props.flops_q50_f32);
-    }
-    LOG_INF("\n");
-
-    LOG_INF("| CPU flops (Q5K x F32, GFLOPS)");
+    LOG_INF("| CPU flops (Q5K x F32, GFLOPS)   ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].cpu_props.flops_q5k_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CPU flops (Q6K x F32, GFLOPS)");
+    LOG_INF("| CPU flops (Q6K x F32, GFLOPS)   ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].cpu_props.flops_q6k_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CPU flops (Q80 x F32, GFLOPS)");
+    LOG_INF("| CPU flops (IQ2XXS x F32, GFLOPS)");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].cpu_props.flops_iq2xxs_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| CPU flops (Q50 x F32, GFLOPS)   ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].cpu_props.flops_q50_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| CPU flops (Q80 x F32, GFLOPS)   ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].cpu_props.flops_q80_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Physical Mem Total (GiB)     ");
+    LOG_INF("| CPU flops (IQ1S x F32, GFLOPS)  ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].cpu_props.flops_iq1s_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| CPU flops (IQ4NL x F32, GFLOPS) ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].cpu_props.flops_iq4nl_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| CPU flops (IQ1M x F32, GFLOPS)  ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].cpu_props.flops_iq1m_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| Physical Mem Total (GiB)        ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].memory.total_physical);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Physical Mem Available (GiB) ");
+    LOG_INF("| Physical Mem Available (GiB)    ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].memory.available_physical);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Used Mem Swappable (GiB)     ");
+    LOG_INF("| Used Mem Swappable (GiB)        ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].memory.used_can_swap);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Swap Mem Total (GiB)         ");
+    LOG_INF("| Swap Mem Total (GiB)            ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].memory.total_swap);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Swap Mem Available (GiB)     ");
+    LOG_INF("| Swap Mem Available (GiB)        ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].memory.available_swap);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CPU RAM Read BW (GB/s)       ");
+    LOG_INF("| CPU RAM Read BW (GB/s)          ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].memory.cpu_read_ram_bw);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CPU KVCache Copy Time (ms/l) ");
+    LOG_INF("| CPU KVCache Copy Time (ms/l)    ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].memory.mem_cpy_delay);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Disk Read Seq Speed (GB/s)   ");
+    LOG_INF("| Disk Read Seq Speed (GB/s)      ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].disk.read_seq_bw);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Disk Write Seq Speed (GB/s)  ");
+    LOG_INF("| Disk Write Seq Speed (GB/s)     ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].disk.write_seq_bw);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Disk Read Rnd Speed (GB/s)   ");
+    LOG_INF("| Disk Read Rnd Speed (GB/s)      ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].disk.read_rnd_bw);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Disk Write Rnd Speed (GB/s)  ");
+    LOG_INF("| Disk Write Rnd Speed (GB/s)     ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].disk.write_rnd_bw);
     }
     LOG_INF("\n");
 
-    LOG_INF("| GPU Metal                    ");
+    LOG_INF("| GPU Metal                       ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10d   ", dev_info_set[i].gpu_support.metal);
     }
     LOG_INF("\n");
 
-    LOG_INF("| GPU CUDA                     ");
+    LOG_INF("| GPU CUDA                        ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10d   ", dev_info_set[i].gpu_support.cuda);
     }
     LOG_INF("\n");
 
-    LOG_INF("| GPU Vulkan                   ");
+    LOG_INF("| GPU Vulkan                      ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10d   ", dev_info_set[i].gpu_support.vulkan);
     }
     LOG_INF("\n");
 
-    LOG_INF("| GPU Kompute                  ");
+    LOG_INF("| GPU Kompute                     ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10d   ", dev_info_set[i].gpu_support.kompute);
     }
     LOG_INF("\n");
 
-    LOG_INF("| GPU BLAS                     ");
+    LOG_INF("| GPU BLAS                        ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10d   ", dev_info_set[i].gpu_support.gpublas);
     }
     LOG_INF("\n");
 
-    LOG_INF("| BLAS                         ");
+    LOG_INF("| BLAS                            ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10d   ", dev_info_set[i].gpu_support.blas);
     }
     LOG_INF("\n");
 
-    LOG_INF("| SYCL                         ");
+    LOG_INF("| SYCL                            ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10d   ", dev_info_set[i].gpu_support.sycl);
     }
     LOG_INF("\n");
 
-    LOG_INF("| GPU Name                     ");
+    LOG_INF("| GPU Name                        ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.10s   ", dev_info_set[i].gpu_props.name);
     }
     LOG_INF("\n");
 
-    LOG_INF("| GPU Description              ");
+    LOG_INF("| GPU Description                 ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.10s   ", dev_info_set[i].gpu_props.description);
     }
     LOG_INF("\n");
 
-    LOG_INF("| GPU Mem Free (GiB)           ");
+    LOG_INF("| GPU Mem Free (GiB)              ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].gpu_props.memory_free);
     }
     LOG_INF("\n");
 
-    LOG_INF("| GPU Mem Total (GiB)          ");
+    LOG_INF("| GPU Mem Total (GiB)             ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].gpu_props.memory_total);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Metal VRAM Read BW (GB/s)    ");
+    LOG_INF("| Metal VRAM Read BW (GB/s)       ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].gpu_props.metal_read_vram_bw);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Metal KVCache Copy Time(ms/l)");
+    LOG_INF("| Metal KVCache Copy Time(ms/l)   ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].gpu_props.metal_mem_cpy_delay);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Metal flops (F32xF32, GFLOPS)");
+    LOG_INF("| Metal flops (F32xF32, GFLOPS)   ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.metal_flops_f32_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Metal flops (F16xF32, GFLOPS)");
+    LOG_INF("| Metal flops (F16xF32, GFLOPS)   ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.metal_flops_f16_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Metal flops (Q4KxF32, GFLOPS)");
+    LOG_INF("| Metal flops (Q2KxF32, GFLOPS)   ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.metal_flops_q2k_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| Metal flops (Q4KxF32, GFLOPS)   ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.metal_flops_q4k_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Metal flops (Q50xF32, GFLOPS)");
-    for (int i = 0; i < n; ++i) {
-        LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.metal_flops_q50_f32);
-    }
-    LOG_INF("\n");
-
-    LOG_INF("| Metal flops (Q5KxF32, GFLOPS)");
+    LOG_INF("| Metal flops (Q5KxF32, GFLOPS)   ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.metal_flops_q5k_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Metal flops (Q6KxF32, GFLOPS)");
+    LOG_INF("| Metal flops (Q6KxF32, GFLOPS)   ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.metal_flops_q6k_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Metal flops (Q80xF32, GFLOPS)");
+    LOG_INF("| Metal flops (IQ2XXSxF32, GFLOPS)");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.metal_flops_iq2xxs_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| Metal flops (Q50xF32, GFLOPS)   ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.metal_flops_q50_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| Metal flops (Q80xF32, GFLOPS)   ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.metal_flops_q80_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CUDA VRAM Read BW (GB/s)     ");
+    LOG_INF("| Metal flops (IQ1SxF32, GFLOPS)  ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.metal_flops_iq1s_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| Metal flops (IQ4NLxF32, GFLOPS) ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.metal_flops_iq4nl_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| Metal flops (IQ1MxF32, GFLOPS)  ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.metal_flops_iq1m_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| CUDA VRAM Read BW (GB/s)        ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].gpu_props.cuda_read_vram_bw);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CUDA KVCache Copy Time (ms/l)");
+    LOG_INF("| CUDA KVCache Copy Time (ms/l)   ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.2f   ", dev_info_set[i].gpu_props.cuda_mem_cpy_delay);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CUDA flops (F32xF32, GFLOPS) ");
+    LOG_INF("| CUDA flops (F32xF32, GFLOPS)    ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.cuda_flops_f32_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CUDA flops (F16xF32, GFLOPS) ");
+    LOG_INF("| CUDA flops (F16xF32, GFLOPS)    ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.cuda_flops_f16_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CUDA flops (Q4KxF32, GFLOPS) ");
+    LOG_INF("| CUDA flops (Q2KxF32, GFLOPS)    ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.cuda_flops_q2k_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| CUDA flops (Q4KxF32, GFLOPS)    ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.cuda_flops_q4k_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CUDA flops (Q50xF32, GFLOPS) ");
-    for (int i = 0; i < n; ++i) {
-        LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.cuda_flops_q50_f32);
-    }
-    LOG_INF("\n");
-
-    LOG_INF("| CUDA flops (Q5KxF32, GFLOPS) ");
+    LOG_INF("| CUDA flops (Q5KxF32, GFLOPS)    ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.cuda_flops_q5k_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CUDA flops (Q6KxF32, GFLOPS) ");
+    LOG_INF("| CUDA flops (Q6KxF32, GFLOPS)    ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.cuda_flops_q6k_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| CUDA flops (Q80xF32, GFLOPS) ");
+    LOG_INF("| CUDA flops (IQ2XXSxF32, GFLOPS) ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.cuda_flops_iq2xxs_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| CUDA flops (Q50xF32, GFLOPS)    ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.cuda_flops_q50_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| CUDA flops (Q80xF32, GFLOPS)    ");
     for (int i = 0; i < n; ++i) {
         LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.cuda_flops_q80_f32);
     }
     LOG_INF("\n");
 
-    LOG_INF("| Model flops (output F32xF32) ");
+    LOG_INF("| CUDA flops (IQ1SxF32, GFLOPS)   ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.cuda_flops_iq1s_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| CUDA flops (IQ4NLxF32, GFLOPS)  ");  
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.cuda_flops_iq4nl_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| CUDA flops (IQ1MxF32, GFLOPS)   ");
+    for (int i = 0; i < n; ++i) {
+        LOG_INF("| %-10.1f   ", dev_info_set[i].gpu_props.cuda_flops_iq1m_f32);
+    }
+    LOG_INF("\n");
+
+    LOG_INF("| Model flops (output F32xF32)    ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.output_f32_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model flops (output F16xF32) ");
+    LOG_INF("| Model flops (output F16xF32)    ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.output_f16_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model flops (output Q4KxF32) ");
+    LOG_INF("| Model flops (output Q2KxF32)    ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.output_q2k_f32);
+    LOG_INF("\n");
+
+    LOG_INF("| Model flops (output Q4KxF32)    ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.output_q4k_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model flops (output Q50xF32) ");
-    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.output_q50_f32);
-    LOG_INF("\n");
-
-    LOG_INF("| Model flops (output Q5KxF32) ");
+    LOG_INF("| Model flops (output Q5KxF32)    ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.output_q5k_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model flops (output Q6KxF32) ");
+    LOG_INF("| Model flops (output Q6KxF32)    ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.output_q6k_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model flops (output Q80xF32) ");
+    LOG_INF("| Model flops (output IQ2XXSxF32) ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.output_iq2xxs_f32);
+    LOG_INF("\n");
+    
+    LOG_INF("| Model flops (output Q50xF32)    ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.output_q50_f32);
+    LOG_INF("\n");
+
+    LOG_INF("| Model flops (output Q80xF32)    ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.output_q80_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model flops (layer F32xF32)  ");
+    LOG_INF("| Model flops (output IQ1SxF32)   ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.output_iq1s_f32);
+    LOG_INF("\n");
+
+    LOG_INF("| Model flops (output IQ4NLxF32)  ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.output_iq4nl_f32);
+    LOG_INF("\n");
+
+    LOG_INF("| Model flops (output IQ1MxF32)   ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.output_iq1m_f32);
+    LOG_INF("\n");
+
+    LOG_INF("| Model flops (layer F32xF32)     ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.layer_f32_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model flops (layer F16xF32)  ");
+    LOG_INF("| Model flops (layer F16xF32)     ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.layer_f16_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model flops (layer Q4KxF32)  ");
+    LOG_INF("| Model flops (layer Q2KxF32)     ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.layer_q2k_f32);
+    LOG_INF("\n");
+
+    LOG_INF("| Model flops (layer Q4KxF32)     ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.layer_q4k_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model flops (layer Q50xF32)  ");
-    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.layer_q50_f32);
-    LOG_INF("\n");
-
-    LOG_INF("| Model flops (layer Q5KxF32)  ");
+    LOG_INF("| Model flops (layer Q5KxF32)     ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.layer_q5k_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model flops (layer Q6KxF32)  ");
+    LOG_INF("| Model flops (layer Q6KxF32)     ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.layer_q6k_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model flops (layer Q80xF32)  ");
+    LOG_INF("| Model flops (layer IQ2XXSxF32)  ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.layer_iq2xxs_f32);
+    LOG_INF("\n");
+
+    LOG_INF("| Model flops (layer Q50xF32)     ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.layer_q50_f32);
+    LOG_INF("\n");
+
+    LOG_INF("| Model flops (layer Q80xF32)     ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.layer_q80_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (input F32)     ");
+    LOG_INF("| Model flops (layer IQ1SxF32)    ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.layer_iq1s_f32);
+    LOG_INF("\n");
+
+    LOG_INF("| Model flops (layer IQ4NLxF32)   ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.layer_iq4nl_f32);
+    LOG_INF("\n");
+
+    LOG_INF("| Model flops (layer IQ1MxF32)    ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_flops.layer_iq1m_f32);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (input F32)        ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.input_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (input F16)     ");
+    LOG_INF("| Model params (input F16)        ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.input_f16);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (input Q4K)     ");
+    LOG_INF("| Model params (input Q2K)        ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.input_q2k);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (input Q4K)        ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.input_q4k);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (input Q50)     ");
-    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.input_q50);
-    LOG_INF("\n");
-
-    LOG_INF("| Model params (input Q5K)     ");
+    LOG_INF("| Model params (input Q5K)        ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.input_q5k);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (input Q6K)     ");
+    LOG_INF("| Model params (input Q6K)        ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.input_q6k);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (input Q80)     ");
+    LOG_INF("| Model params (input IQ2XXS)     ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.input_iq2xxs);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (input Q50)        ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.input_q50);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (input Q80)        ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.input_q80);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (layer F32)     ");
+    LOG_INF("| Model params (input IQ1S)       ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.input_iq1s);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (input IQ4NL)      ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.input_iq4nl);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (input IQ1M)       ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.input_iq1m);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (layer F32)        ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.layer_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (layer F16)     ");
+    LOG_INF("| Model params (layer F16)        ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.layer_f16);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (layer Q4K)     ");
+    LOG_INF("| Model params (layer Q2K)        ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.layer_q2k);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (layer Q4K)        ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.layer_q4k);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (layer Q50)     ");
-    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.layer_q50);
-    LOG_INF("\n");
-
-    LOG_INF("| Model params (layer Q5K)     ");
+    LOG_INF("| Model params (layer Q5K)        ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.layer_q5k);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (layer Q6K)     ");
+    LOG_INF("| Model params (layer Q6K)        ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.layer_q6k);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (layer Q80)     ");
+    LOG_INF("| Model params (layer IQ2XXS)     ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.layer_iq2xxs);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (layer Q50)        ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.layer_q50);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (layer Q80)        ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.layer_q80);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (output F32)    ");
+    LOG_INF("| Model params (layer IQ1S)       ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.layer_iq1s);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (layer IQ4NL)      ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.layer_iq4nl);
+    LOG_INF("\n");        
+    
+    LOG_INF("| Model params (layer IQ1M)       ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.layer_iq1m);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (output F32)       ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.output_f32);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (output F16)    ");
+    LOG_INF("| Model params (output F16)       ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.output_f16);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (output Q4K)    ");
+    LOG_INF("| Model params (output Q2K)       ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.output_q2k);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (output Q4K)       ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.output_q4k);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (output Q50)    ");
-    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.output_q50);
-    LOG_INF("\n");
-
-    LOG_INF("| Model params (output Q5K)    ");
+    LOG_INF("| Model params (output Q5K)       ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.output_q5k);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (output Q6K)    ");
+    LOG_INF("| Model params (output Q6K)       ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.output_q6k);
     LOG_INF("\n");
 
-    LOG_INF("| Model params (output Q80)    ");
+    LOG_INF("| Model params (output IQ2XXS)    ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.output_iq2xxs);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (output Q50)       ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.output_q50);
+    LOG_INF("\n");
+
+    LOG_INF("| Model params (output Q80)       ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.output_q80);
     LOG_INF("\n");
 
-    LOG_INF("| Model bytes  (input)         ");
+    LOG_INF("| Model params (output IQ1S)      ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.output_iq1s);
+    LOG_INF("\n");    
+
+    LOG_INF("| Model params (output IQ4NL)     ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.output_iq4nl);
+    LOG_INF("\n");  
+
+    LOG_INF("| Model params (output IQ1M)      ");
+    LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_params.output_iq1m);
+    LOG_INF("\n");
+
+    LOG_INF("| Model bytes  (input)            ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_bytes.nb_input);
     LOG_INF("\n");
 
-    LOG_INF("| Model bytes  (layer)         ");
+    LOG_INF("| Model bytes  (layer)            ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_bytes.nb_layer);
     LOG_INF("\n");
 
-    LOG_INF("| Model bytes  (output)        ");
+    LOG_INF("| Model bytes  (output)           ");
     LOG_INF("| %-10" PRId64 "   ", dev_info_set[0].model_bytes.nb_output);
     LOG_INF("\n");
 
@@ -2140,31 +2384,60 @@ size_t serialize(const struct device_info * dev_info, char ** buffer) {
     // calculate total size for serialized buffer
     size_t device_name_len     = strlen(dev_info->device_name) + 1;
     size_t device_os_len       = strlen(dev_info->device_os) + 1;
+    size_t next_ip_len         = strlen(dev_info->next_ip) + 1;
     size_t cpu_name_len        = strlen(dev_info->cpu_props.name) + 1;
     size_t cpu_description_len = strlen(dev_info->cpu_props.description) + 1;
     size_t gpu_name_len        = strlen(dev_info->gpu_props.name) + 1;
     size_t gpu_description_len = strlen(dev_info->gpu_props.description) + 1;
 
     size_t total_size = sizeof(uint32_t)
-                      + sizeof(size_t) * 6  // for lengths of strings
+                      + sizeof(size_t) * 7  // for lengths of strings
                       + device_name_len
                       + device_os_len
+                      + next_ip_len
                       + cpu_name_len
                       + cpu_description_len
                       + gpu_name_len
                       + gpu_description_len
                       + sizeof(struct disk_props)
                       + sizeof(uint32_t)    // cpu_props.cores
-                      + sizeof(float) * 7   // cpu_props.flops_f32_f32, cpu_props.flops_f16_f32, cpu_props.flops_q4k_f32, cpu_props.flops_q50_f32, cpu_props.flops_q5k_f32, cpu_props.flops_q6k_f32, cpu_props.flops_q80_f32
+                      + sizeof(float) * 12  // - cpu_props.flops_f32_f32,   cpu_props.flops_f16_f32,
+                                            // - cpu_props.flops_q2k_f32,   cpu_props.flops_q4k_f32, cpu_props.flops_q5k_f32, cpu_props.flops_q6k_f32
+                                            // - cpu_props.flops_iq2xxs_f32
+                                            // - cpu_props.flops_q50_f32,   cpu_props.flops_q80_f32
+                                            // - cpu_props.flops_iq1s_f32,  cpu_props.flops_iq4nl_f32
+                                            // - cpu_props.flops_iq1m_f32
                       + sizeof(struct memory_info)
                       + sizeof(struct gpu_support)
-                      + sizeof(float) * 20; // gpu_props.memory_free, gpu_props.memory_total, gpu_props.metal_read_vram_bw, gpu_props.cuda_read_vram_bw,
-                                            // gpu_props.metal_flops_f32_f32, gpu_props.metal_flops_f16_f32, gpu_props.metal_flops_q4k_f32, gpu_props.metal_flops_q50_f32, gpu_props.metal_flops_q5k_f32, gpu_props.metal_flops_q6k_f32, gpu_props.metal_flops_q80_f32, 
-                                            // gpu_props.cuda_flops_f32_f32, gpu_props.cuda_flops_f16_f32, gpu_props.cuda_flops_q4k_f32, gpu_props.cuda_flops_q50_f32, gpu_props.cuda_flops_q5k_f32, gpu_props.cuda_flops_q6k_f32, gpu_props.cuda_flops_q80_f32,
-                                            // gpu_props.metal_mem_cpy_delay, gpu_props.cuda_mem_cpy_delay
+                      + sizeof(float) * 30;     // GPU attributes
+                                                // memory:
+                                                // - memory_free,           memory_total
+                                                // - metal_read_vram_bw,    cuda_read_vram_bw
+                                                // Metal floating-point performance:
+                                                // - metal_flops_f32_f32,   metal_flops_f16_f32
+                                                // - metal_flops_q2k_f32,   metal_flops_q4k_f32, metal_flops_q5k_f32, metal_flops_q6k_f32
+                                                // - metal_flops_iq2xxs_f32
+                                                // - metal_flops_q50_f32,   metal_flops_q80_f32
+                                                // - metal_flops_iq1s_f32,  metal_flops_iq4nl_f32
+                                                // - metal_flops_iq1m_f32
+                                                // CUDA floating-point performance:
+                                                // - cuda_flops_f32_f32,    cuda_flops_f16_f32
+                                                // - cuda_flops_q2k_f32,    cuda_flops_q4k_f32, cuda_flops_q5k_f32, cuda_flops_q6k_f32
+                                                // - cuda_flops_iq2xxs_f32
+                                                // - cuda_flops_q50_f32,    cuda_flops_q80_f32
+                                                // - cuda_flops_iq1s_f32,   cuda_flops_iq4nl_f32
+                                                // - cuda_flops_iq1m_f32
+                                                // delay:
+                                                // - metal_mem_cpy_delay,   cuda_mem_cpy_delay
 
     *buffer = (char *)malloc(total_size);
     char * ptr = *buffer;
+
+    if (*buffer == NULL) {
+        LOG_ERR("%s: failed to allocate %zu bytes for device info serialization\n", 
+                __func__, total_size);
+        return 0;
+    }
 
     // rank
     memcpy(ptr, &dev_info->rank, sizeof(uint32_t));
@@ -2180,6 +2453,11 @@ size_t serialize(const struct device_info * dev_info, char ** buffer) {
     ptr += sizeof(size_t);
     memcpy(ptr, dev_info->device_os, device_os_len);
     ptr += device_os_len;
+
+    memcpy(ptr, &next_ip_len, sizeof(size_t));
+    ptr += sizeof(size_t);
+    memcpy(ptr, dev_info->next_ip, next_ip_len);
+    ptr += next_ip_len;
 
     memcpy(ptr, &cpu_name_len, sizeof(size_t));
     ptr += sizeof(size_t);
@@ -2214,10 +2492,10 @@ size_t serialize(const struct device_info * dev_info, char ** buffer) {
     memcpy(ptr, &dev_info->cpu_props.flops_f16_f32, sizeof(float));
     ptr += sizeof(float);
 
-    memcpy(ptr, &dev_info->cpu_props.flops_q4k_f32, sizeof(float));
+    memcpy(ptr, &dev_info->cpu_props.flops_q2k_f32, sizeof(float));
     ptr += sizeof(float);
 
-    memcpy(ptr, &dev_info->cpu_props.flops_q50_f32, sizeof(float));
+    memcpy(ptr, &dev_info->cpu_props.flops_q4k_f32, sizeof(float));
     ptr += sizeof(float);
 
     memcpy(ptr, &dev_info->cpu_props.flops_q5k_f32, sizeof(float));
@@ -2226,7 +2504,22 @@ size_t serialize(const struct device_info * dev_info, char ** buffer) {
     memcpy(ptr, &dev_info->cpu_props.flops_q6k_f32, sizeof(float));
     ptr += sizeof(float);
 
+    memcpy(ptr, &dev_info->cpu_props.flops_iq2xxs_f32, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(ptr, &dev_info->cpu_props.flops_q50_f32, sizeof(float));
+    ptr += sizeof(float);
+
     memcpy(ptr, &dev_info->cpu_props.flops_q80_f32, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(ptr, &dev_info->cpu_props.flops_iq1s_f32, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(ptr, &dev_info->cpu_props.flops_iq4nl_f32, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(ptr, &dev_info->cpu_props.flops_iq1m_f32, sizeof(float));
     ptr += sizeof(float);
 
     memcpy(ptr, &dev_info->memory, sizeof(struct memory_info));
@@ -2250,10 +2543,10 @@ size_t serialize(const struct device_info * dev_info, char ** buffer) {
     memcpy(ptr, &dev_info->gpu_props.metal_flops_f16_f32, sizeof(float));
     ptr += sizeof(float);
 
-    memcpy(ptr, &dev_info->gpu_props.metal_flops_q4k_f32, sizeof(float));
+    memcpy(ptr, &dev_info->gpu_props.metal_flops_q2k_f32, sizeof(float));
     ptr += sizeof(float);
 
-    memcpy(ptr, &dev_info->gpu_props.metal_flops_q50_f32, sizeof(float));
+    memcpy(ptr, &dev_info->gpu_props.metal_flops_q4k_f32, sizeof(float));
     ptr += sizeof(float);
 
     memcpy(ptr, &dev_info->gpu_props.metal_flops_q5k_f32, sizeof(float));
@@ -2262,7 +2555,22 @@ size_t serialize(const struct device_info * dev_info, char ** buffer) {
     memcpy(ptr, &dev_info->gpu_props.metal_flops_q6k_f32, sizeof(float));
     ptr += sizeof(float);
 
+    memcpy(ptr, &dev_info->gpu_props.metal_flops_iq2xxs_f32, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(ptr, &dev_info->gpu_props.metal_flops_q50_f32, sizeof(float));
+    ptr += sizeof(float);
+
     memcpy(ptr, &dev_info->gpu_props.metal_flops_q80_f32, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(ptr, &dev_info->gpu_props.metal_flops_iq1s_f32, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(ptr, &dev_info->gpu_props.metal_flops_iq4nl_f32, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(ptr, &dev_info->gpu_props.metal_flops_iq1m_f32, sizeof(float));
     ptr += sizeof(float);
 
     memcpy(ptr, &dev_info->gpu_props.metal_mem_cpy_delay, sizeof(float));
@@ -2277,10 +2585,10 @@ size_t serialize(const struct device_info * dev_info, char ** buffer) {
     memcpy(ptr, &dev_info->gpu_props.cuda_flops_f16_f32, sizeof(float));
     ptr += sizeof(float);
 
-    memcpy(ptr, &dev_info->gpu_props.cuda_flops_q4k_f32, sizeof(float));
+    memcpy(ptr, &dev_info->gpu_props.cuda_flops_q2k_f32, sizeof(float));
     ptr += sizeof(float);
 
-    memcpy(ptr, &dev_info->gpu_props.cuda_flops_q50_f32, sizeof(float));
+    memcpy(ptr, &dev_info->gpu_props.cuda_flops_q4k_f32, sizeof(float));
     ptr += sizeof(float);
 
     memcpy(ptr, &dev_info->gpu_props.cuda_flops_q5k_f32, sizeof(float));
@@ -2289,7 +2597,22 @@ size_t serialize(const struct device_info * dev_info, char ** buffer) {
     memcpy(ptr, &dev_info->gpu_props.cuda_flops_q6k_f32, sizeof(float));
     ptr += sizeof(float);
 
+    memcpy(ptr, &dev_info->gpu_props.cuda_flops_iq2xxs_f32, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(ptr, &dev_info->gpu_props.cuda_flops_q50_f32, sizeof(float));
+    ptr += sizeof(float);
+
     memcpy(ptr, &dev_info->gpu_props.cuda_flops_q80_f32, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(ptr, &dev_info->gpu_props.cuda_flops_iq1s_f32, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(ptr, &dev_info->gpu_props.cuda_flops_iq4nl_f32, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(ptr, &dev_info->gpu_props.cuda_flops_iq1m_f32, sizeof(float));
     ptr += sizeof(float);
 
     memcpy(ptr, &dev_info->gpu_props.cuda_mem_cpy_delay, sizeof(float));
@@ -2320,6 +2643,14 @@ void deserialize(const char * buffer, struct device_info * dev_info) {
     dev_info->device_os = (char *)malloc(device_os_len);
     memcpy(const_cast<void*>(static_cast<const void*>(dev_info->device_os)), ptr, device_os_len);
     ptr += device_os_len;
+
+    // next ip
+    size_t next_ip_len;
+    memcpy(&next_ip_len, ptr, sizeof(size_t));
+    ptr += sizeof(size_t);
+    dev_info->next_ip = (char *)malloc(next_ip_len);
+    memcpy(const_cast<void*>(static_cast<const void*>(dev_info->next_ip)), ptr, next_ip_len);
+    ptr += next_ip_len;
 
     // cpu_props.name
     size_t cpu_name_len;
@@ -2366,10 +2697,10 @@ void deserialize(const char * buffer, struct device_info * dev_info) {
     memcpy(&dev_info->cpu_props.flops_f16_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
-    memcpy(&dev_info->cpu_props.flops_q4k_f32, ptr, sizeof(float));
+    memcpy(&dev_info->cpu_props.flops_q2k_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
-    memcpy(&dev_info->cpu_props.flops_q50_f32, ptr, sizeof(float));
+    memcpy(&dev_info->cpu_props.flops_q4k_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
     memcpy(&dev_info->cpu_props.flops_q5k_f32, ptr, sizeof(float));
@@ -2378,7 +2709,22 @@ void deserialize(const char * buffer, struct device_info * dev_info) {
     memcpy(&dev_info->cpu_props.flops_q6k_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
+    memcpy(&dev_info->cpu_props.flops_iq2xxs_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(&dev_info->cpu_props.flops_q50_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
     memcpy(&dev_info->cpu_props.flops_q80_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(&dev_info->cpu_props.flops_iq1s_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(&dev_info->cpu_props.flops_iq4nl_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(&dev_info->cpu_props.flops_iq1m_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
     memcpy(&dev_info->memory, ptr, sizeof(struct memory_info));
@@ -2402,10 +2748,10 @@ void deserialize(const char * buffer, struct device_info * dev_info) {
     memcpy(&dev_info->gpu_props.metal_flops_f16_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
-    memcpy(&dev_info->gpu_props.metal_flops_q4k_f32, ptr, sizeof(float));
+    memcpy(&dev_info->gpu_props.metal_flops_q2k_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
-    memcpy(&dev_info->gpu_props.metal_flops_q50_f32, ptr, sizeof(float));
+    memcpy(&dev_info->gpu_props.metal_flops_q4k_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
     memcpy(&dev_info->gpu_props.metal_flops_q5k_f32, ptr, sizeof(float));
@@ -2414,7 +2760,22 @@ void deserialize(const char * buffer, struct device_info * dev_info) {
     memcpy(&dev_info->gpu_props.metal_flops_q6k_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
+    memcpy(&dev_info->gpu_props.metal_flops_iq2xxs_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(&dev_info->gpu_props.metal_flops_q50_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
     memcpy(&dev_info->gpu_props.metal_flops_q80_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(&dev_info->gpu_props.metal_flops_iq1s_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(&dev_info->gpu_props.metal_flops_iq4nl_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(&dev_info->gpu_props.metal_flops_iq1m_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
     memcpy(&dev_info->gpu_props.metal_mem_cpy_delay, ptr, sizeof(float));
@@ -2429,10 +2790,10 @@ void deserialize(const char * buffer, struct device_info * dev_info) {
     memcpy(&dev_info->gpu_props.cuda_flops_f16_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
-    memcpy(&dev_info->gpu_props.cuda_flops_q4k_f32, ptr, sizeof(float));
+    memcpy(&dev_info->gpu_props.cuda_flops_q2k_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
-    memcpy(&dev_info->gpu_props.cuda_flops_q50_f32, ptr, sizeof(float));
+    memcpy(&dev_info->gpu_props.cuda_flops_q4k_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
     memcpy(&dev_info->gpu_props.cuda_flops_q5k_f32, ptr, sizeof(float));
@@ -2441,7 +2802,22 @@ void deserialize(const char * buffer, struct device_info * dev_info) {
     memcpy(&dev_info->gpu_props.cuda_flops_q6k_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
+    memcpy(&dev_info->gpu_props.cuda_flops_iq2xxs_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(&dev_info->gpu_props.cuda_flops_q50_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
     memcpy(&dev_info->gpu_props.cuda_flops_q80_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(&dev_info->gpu_props.cuda_flops_iq1s_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(&dev_info->gpu_props.cuda_flops_iq4nl_f32, ptr, sizeof(float));
+    ptr += sizeof(float);
+
+    memcpy(&dev_info->gpu_props.cuda_flops_iq1m_f32, ptr, sizeof(float));
     ptr += sizeof(float);
 
     memcpy(&dev_info->gpu_props.cuda_mem_cpy_delay, ptr, sizeof(float));

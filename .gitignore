@@ -67,6 +67,7 @@ autogen-*.md
 
 /main
 /server
+/profile-tool
 
 # CI
 
@@ -136,3 +137,7 @@ poetry.toml
 
 # Video
 *.mp4
+
+# fio
+fio_test*
+*.fio
