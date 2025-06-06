@@ -2,7 +2,8 @@
 BUILD_TARGETS = \
 	llama-server \
 	llama-cli \
-	profile-tool
+	profile-tool \
+	llama-perplexity
 
 # BUILD_TARGETS = \
 # 	libllava.a \

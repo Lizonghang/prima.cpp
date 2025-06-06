@@ -586,6 +586,7 @@ static results_perplexity perplexity(llama_context * ctx, const gpt_params & par
             int n_outputs = 0;
 
             batch.n_tokens = 0;
+
             for (int seq = 0; seq < n_seq_batch; seq++) {
                 int seq_start = batch_start + seq*n_ctx;
 
@@ -599,6 +600,7 @@ static results_perplexity perplexity(llama_context * ctx, const gpt_params & par
 
                 for (int k = 0; k < batch_size; ++k) {
                     const int idx = seq*n_ctx + k;
+
                     batch.token   [idx]    = tokens[seq_start + k];
                     batch.pos     [idx]    = j*n_batch + k;
                     batch.n_seq_id[idx]    = 1;
