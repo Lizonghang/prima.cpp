@@ -47,6 +47,7 @@
 #include <unordered_map>
 #include <dirent.h>
 
+constexpr uint64_t kUnlimitedMemory = UINT64_MAX;
 
 static int gcd_int(int a, int b) {
     while (b != 0) {
@@ -583,16 +584,22 @@ static uint64_t device_host_physical_memory(bool available) {
 static uint64_t read_value_from_file(const char * path) {
     std::ifstream file(path);
     if (!file.is_open()) {
-        return 0;
+        return kUnlimitedMemory;
     }
+
     std::string line;
     if (!std::getline(file, line)) {
-        return 0;
+        return kUnlimitedMemory;
     }
+
+    if (line == "max") {               
+        return kUnlimitedMemory;
+    }
+
     try {
         return std::stoull(line);
     } catch (...) {
-        return 0;
+        return kUnlimitedMemory;
     }
 }
 
@@ -620,66 +627,56 @@ static std::unordered_map<std::string, uint64_t> read_memory_stat() {
 }
 
 static uint64_t device_cgroup_physical_memory(bool available) {
-    const char * file_path = nullptr;
+    constexpr uint64_t kUNLIMITED = UINT64_MAX;
 
     bool is_cgroup_v2 = false;
     {
-        std::ifstream cgroup_file("/proc/cgroups");
-        if (cgroup_file.is_open()) {
-            std::string line;
-            while (std::getline(cgroup_file, line)) {
-                if (line.find("0") != std::string::npos) {
-                    is_cgroup_v2 = true;
-                    break;
-                }
+        std::ifstream mi("/proc/self/mountinfo");
+        std::string l;
+        while (std::getline(mi, l)) {
+            if (l.find(" - cgroup2 ") != std::string::npos) {
+                is_cgroup_v2 = true;
+                break;
             }
         }
     }
-
+    
+    auto read_or_host = [&](const char *path) -> uint64_t {
+        uint64_t v = read_value_from_file(path);
+        return v == kUNLIMITED ? device_host_physical_memory(false) : v;
+    };
+   
     if (!available) {
-        if (is_cgroup_v2) {
-            file_path = "/sys/fs/cgroup/memory.max";
-        } else {
-            file_path = "/sys/fs/cgroup/memory/memory.limit_in_bytes";
-        }
-        return read_value_from_file(file_path);
-    } else {
-        if (is_cgroup_v2) {
-            uint64_t mem_max     = read_value_from_file("/sys/fs/cgroup/memory.max");
-            uint64_t mem_current = read_value_from_file("/sys/fs/cgroup/memory.current");
-
-            if (mem_max == UINT64_MAX) {
-                mem_max = device_host_physical_memory(false);
-            }
-
-            uint64_t mem_low = read_value_from_file("/sys/fs/cgroup/memory.low");
-
-            auto stats = read_memory_stat();
-
-            uint64_t slab_reclaimable = 0;
-            uint64_t mmap_file        = 0;
-
-            if (stats.find("slab_reclaimable") != stats.end()) {
-                slab_reclaimable = stats["slab_reclaimable"];
-            }
-            if (stats.find("file") != stats.end()) {
-                mmap_file = stats["file"];
-            }
-
-            uint64_t available_memory = mem_max - mem_current;
-            if (mem_low > 0 && available_memory < mem_low) {
-                available_memory = mem_low;
-            }
-            available_memory += slab_reclaimable * 0.5 + mmap_file * 0.5;
-            
-            return available_memory < mem_max ? available_memory : mem_max;
-        } else {
-            LOG_WRN("Using cgroup v1, the available memory could be error, will be addressed later\n");
-            uint64_t mem_limit = read_value_from_file("/sys/fs/cgroup/memory/memory.limit_in_bytes");
-            uint64_t mem_usage = read_value_from_file("/sys/fs/cgroup/memory/memory.usage_in_bytes");
-            return mem_limit - mem_usage > 0 ? mem_limit - mem_usage : 0;
-        }
+        return is_cgroup_v2
+               ? read_or_host("/sys/fs/cgroup/memory.max")               // v2
+               : read_or_host("/sys/fs/cgroup/memory/memory.limit_in_bytes"); // v1
     }
+   
+    if (is_cgroup_v2) {
+        uint64_t mem_max     = read_or_host("/sys/fs/cgroup/memory.max");
+        uint64_t mem_current = read_value_from_file("/sys/fs/cgroup/memory.current");
+        uint64_t mem_low     = read_value_from_file("/sys/fs/cgroup/memory.low");
+
+        
+        auto stats = read_memory_stat();
+        uint64_t slab_reclaimable = stats.count("slab_reclaimable") ? stats["slab_reclaimable"] : 0;
+        uint64_t mmap_file        = stats.count("file")             ? stats["file"]             : 0;
+
+        uint64_t available_memory = mem_max > mem_current ? mem_max - mem_current : 0;
+        if (mem_low > 0 && available_memory < mem_low) {
+            available_memory = mem_low;
+        }
+        available_memory += static_cast<uint64_t>(slab_reclaimable * 0.5 + mmap_file * 0.5);
+
+        return std::min(available_memory, mem_max);
+    }
+
+    //  v1 
+    LOG_WRN("Using cgroup v1, the available memory may be inaccurate, will be addressed later\n");
+    uint64_t mem_limit = read_or_host("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+    uint64_t mem_usage = read_value_from_file("/sys/fs/cgroup/memory/memory.usage_in_bytes");
+
+    return mem_limit > mem_usage ? mem_limit - mem_usage : 0;
 }
 
 uint64_t device_physical_memory(bool available) {
