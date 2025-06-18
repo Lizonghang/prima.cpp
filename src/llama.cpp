@@ -17866,46 +17866,13 @@ struct input_tensors {
     ggml_tensor * inp_pos;
 };
 
-struct sync_meta {
-    int32_t n_tokens           = 0;
-    llama_pos * pos            = nullptr;
-    llama_pos all_pos_0;
-    llama_pos all_pos_1;
-    uint32_t n_ctx             = 0;
-
-    // signal to clear the kv cache
-    bool clear_kv_cache        = false;
-
-    // signal to remove a kv cache sequence
-    bool kv_seq_rm             = false;
-    llama_seq_id rm_seq_id     = 0;
-    llama_pos    rm_p0         = 0;
-    llama_pos    rm_p1         = 0;
-
-    // signal to add a kv cache sequence
-    bool kv_seq_add            = false;
-    llama_seq_id add_seq_id    = 0;
-    llama_pos    add_p0        = 0;
-    llama_pos    add_p1        = 0;
-    llama_pos    add_delta     = 0;
-
-    // signal to copy a kv cache sequence
-    bool kv_seq_cp             = false;
-    llama_seq_id cp_src_seq_id = 0;
-    llama_seq_id cp_dst_seq_id = 0;
-    llama_pos    cp_p0         = 0;
-    llama_pos    cp_p1         = 0;
-
-    // signal to divide the kv cache range
-    bool kv_seq_div            = false;
-    llama_seq_id div_seq_id    = 0;
-    llama_pos    div_p0        = 0;
-    llama_pos    div_p1        = 0;
-    int          div_factor    = 1;
-};
-
-static void llama_send_meta(zmq::socket_t & socket, struct sync_meta * meta) {
+void llama_send_meta(llama_context * ctx, struct sync_meta * meta) {
+    GGML_ASSERT(ctx != nullptr);
     GGML_ASSERT(meta != nullptr);
+
+    zmq::socket_t * send_socket = ctx->send_socket;
+    GGML_ASSERT(send_socket != nullptr); 
+
     try {
         std::vector<zmq::message_t> send_msgs;
 
@@ -17924,21 +17891,24 @@ static void llama_send_meta(zmq::socket_t & socket, struct sync_meta * meta) {
         send_msgs.emplace_back("all_pos_1", strlen("all_pos_1"));
         send_msgs.emplace_back(&(meta->all_pos_1), sizeof(meta->all_pos_1));
 
-        zmq::send_multipart(socket, send_msgs);
+        if (!send_msgs.empty()) {
+            zmq::send_multipart(*send_socket, send_msgs);
+        }
     } catch (const zmq::error_t& e) {
         LLAMA_LOG_INFO("Failed to send meta data: %s\n", e.what());
     }
 }
 
-static int llama_recv_meta(zmq::socket_t & socket, struct sync_meta * meta) {
-    socket.set(zmq::sockopt::rcvtimeo, 1000);
+int llama_recv_meta(llama_context * ctx, struct sync_meta * meta) {
+    ctx->recv_socket->set(zmq::sockopt::rcvtimeo, 1000);
 
     std::vector<zmq::message_t> recv_msgs;
-    if (!zmq::recv_multipart(socket, std::back_inserter(recv_msgs))) {
+
+    if (!zmq::recv_multipart(*(ctx->recv_socket), std::back_inserter(recv_msgs))) {
         return -1;
     }
 
-    socket.set(zmq::sockopt::rcvtimeo, -1);
+    ctx->recv_socket->set(zmq::sockopt::rcvtimeo, -1);
 
     const std::string cmd = recv_msgs[0].to_string();
     size_t idx = 1;
@@ -18210,11 +18180,6 @@ static void manage_graph_tensors(struct ggml_cgraph * cgraph, int advice, bool f
 static int llama_decode_internal(
          llama_context & lctx,
            llama_batch & batch_all) { // TODO: rename back to batch
-
-    // llama_batch_allocr batch_allocr(inp_batch, inp_batch.pos ? -1 : lctx.kv_self.get_pos_max() + 1);
-
-    // // const llama_batch & batch_all = batch_allocr.batch;
-    // llama_batch & batch_all = batch_allocr.batch;
     
     lctx.is_encoding = false;
 
@@ -18277,13 +18242,13 @@ static int llama_decode_internal(
         n_outputs = 1;
     }
 
-    // TODO:needs to be encapsulated into a function
+    // prepare for send and receive of metadata
     sync_meta meta;
     meta.n_ctx = cparams.n_ctx;
     bool is_last_dev = (my_rank == n_world - 1);
 
     if (my_rank != 0) {
-        if (llama_recv_meta(*lctx.recv_socket, &meta) == -1) {
+        if (llama_recv_meta(&lctx, &meta) == -1) {
             return -1;
         }
 
@@ -18343,7 +18308,7 @@ static int llama_decode_internal(
         meta.pos       = batch_all.pos;
         meta.all_pos_0 = batch_all.all_pos_0;
         meta.all_pos_1 = batch_all.all_pos_1;
-        llama_send_meta(*lctx.send_socket, &meta);
+        llama_send_meta(&lctx, &meta);
     } 
     
     lctx.sbatch.from_batch(batch_all, n_embd,
