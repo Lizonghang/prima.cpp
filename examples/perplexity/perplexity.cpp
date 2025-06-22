@@ -691,23 +691,24 @@ static results_perplexity perplexity(llama_context * ctx, const gpt_params & par
                 }
             }
 
+            if (my_rank == 0) {
+                // Required batch info: Operation scale, KV cache location, Logits calculation location
+                meta.n_ctx     = n_ctx;
+                meta.n_tokens  = batch.n_tokens;
+                meta.pos       = batch.pos;
+                meta.logits    = batch.logits;
+                meta.all_pos_0 = batch.all_pos_0;
+                meta.all_pos_1 = batch.all_pos_1;
+                meta.n_outputs = n_outputs;
+                meta.chunk_start_pos = start;
+            }
+
             // other ranks need to know batch info
             {
                 if (n_world > 1) {
                     meta.n_ctx = n_ctx;
 
                     if (my_rank == 0) {
-                        // Required batch info: Operation scale, KV cache location, Logits calculation location
-                        meta.n_tokens = batch.n_tokens;
-                        meta.pos      = batch.pos;
-                        meta.logits   = batch.logits; 
-
-                        meta.all_pos_0 = batch.all_pos_0;
-                        meta.all_pos_1 = batch.all_pos_1;
-
-                        meta.n_outputs = n_outputs;
-                        meta.chunk_start_pos = start;
-                        
                         llama_send_meta(ctx, &meta);
                     } else {
                         if (llama_recv_meta(ctx, &meta) == -1) {

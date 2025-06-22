@@ -18316,8 +18316,8 @@ static int llama_decode_internal(
         /* logits_all   */ n_outputs == n_tokens_all);
 
     // reserve output buffer
-    if (my_rank == 0 && llama_output_reserve(lctx, n_outputs) < n_outputs) {
-        LLAMA_LOG_ERROR("%s: could not reserve space for batch with %u outputs\n", __func__, n_outputs);
+    if (my_rank == 0 && llama_output_reserve(lctx, n_outputs) < (size_t)n_outputs) {
+        LLAMA_LOG_ERROR("%s: could not reserve space for batch with %llu outputs\n", __func__, n_outputs);
         return -2;
     };
 
