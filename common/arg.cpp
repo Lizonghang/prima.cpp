@@ -1692,9 +1692,9 @@ gpt_params_context gpt_params_parser_init(gpt_params & params, llama_example ex,
         {"-md", "--model-draft"}, "FNAME",
         "draft model for speculative decoding (default: unused)",
         [](gpt_params & params, const std::string & value) {
-            params.model_draft = value;
+            params.speculative.model = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SPECULATIVE}));
+    ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER}));
     add_opt(llama_arg(
         {"-mu", "--model-url"}, "MODEL_URL",
         "model download url (default: unused)",

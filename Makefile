@@ -963,6 +963,7 @@ OBJ_COMMON = \
 	common/console.o \
 	common/ngram-cache.o \
 	common/sampling.o \
+	common/speculative.o \
 	common/train.o \
 	common/build-info.o \
 	common/json-schema-to-grammar.o
@@ -1237,6 +1238,13 @@ common/console.o: \
 common/json-schema-to-grammar.o: \
 	common/json-schema-to-grammar.cpp \
 	common/json-schema-to-grammar.h
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# speculative 
+common/speculative.o: \
+	common/speculative.cpp \
+	common/speculative.h \
+	include/llama.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 common/train.o: \

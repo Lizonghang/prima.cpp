@@ -318,6 +318,45 @@ llama_token gpt_sampler_sample(struct gpt_sampler * gsmpl, struct llama_context 
     return cur_p.data[cur_p.selected].id;
 }
 
+std::vector<llama_token> gpt_sampler_sample_and_accept_n(struct gpt_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, bool grammar_first) {
+    GGML_ASSERT(idxs.size() == draft.size() + 1 && "idxs.size() must be draft.size() + 1");
+
+    std::vector<llama_token> result;
+    result.reserve(idxs.size());
+
+    size_t i = 0;
+    for (; i < draft.size(); i++) {
+        const llama_token id = gpt_sampler_sample(gsmpl, ctx, idxs[i], grammar_first);
+
+        gpt_sampler_accept(gsmpl, id, true);
+
+        result.push_back(id);
+
+        if (draft[i] != id) {
+            break;
+        }
+    }
+
+    if (i == draft.size()) {
+        const llama_token id = gpt_sampler_sample(gsmpl, ctx, idxs[i], grammar_first);
+
+        gpt_sampler_accept(gsmpl, id, true);
+
+        result.push_back(id);
+    }
+
+    return result;
+}
+
+std::vector<llama_token> gpt_sampler_sample_and_accept_n(struct gpt_sampler * gsmpl, struct llama_context * ctx, const llama_tokens & draft, bool grammar_first) {
+    std::vector<int> idxs(draft.size() + 1);
+    for (size_t i = 0; i < idxs.size(); ++i) {
+        idxs[i] = i;
+    }
+
+    return gpt_sampler_sample_and_accept_n(gsmpl, ctx, idxs, draft, grammar_first);
+}
+
 uint32_t gpt_sampler_get_seed(const struct gpt_sampler * gsmpl) {
     return llama_sampler_get_seed(gsmpl->chain);
 }

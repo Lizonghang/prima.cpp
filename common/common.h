@@ -33,6 +33,8 @@ struct llama_lora_adapter_container : llama_lora_adapter_info {
     struct llama_lora_adapter * adapter;
 };
 
+using llama_tokens = std::vector<llama_token>;
+
 // build info
 extern int LLAMA_BUILD_NUMBER;
 extern char const * LLAMA_COMMIT;
@@ -141,6 +143,20 @@ struct gpt_sampler_params {
     std::string print() const;
 };
 
+struct common_params_speculative {
+    int32_t n_ctx        =     0; // draft context size
+    int32_t n_max        =    16; // maximum number of tokens to draft during speculative decoding
+    int32_t n_min        =     5; // minimum number of draft tokens to use for speculative decoding
+    int32_t n_gpu_layers =    -1; // number of layers to store in VRAM for the draft model (-1 - use default)
+    float   p_split      =  0.1f; // speculative decoding split probability
+    float   p_min        =  0.9f; // minimum speculative decoding probability (greedy)
+
+    struct cpu_params cpuparams;
+    struct cpu_params cpuparams_batch;
+
+    std::string model = ""; // draft model for speculative decoding                          // NOLINT
+};
+
 struct gpt_params {
     int32_t n_world               =     1; // number of devices to use
     int32_t rank                  =     0; // my rank for distributed inference
@@ -197,9 +213,9 @@ struct gpt_params {
     enum llama_attention_type    attention_type    = LLAMA_ATTENTION_TYPE_UNSPECIFIED; // attention type for embeddings
 
     struct gpt_sampler_params sparams;
+    struct common_params_speculative speculative;
 
     std::string model                = ""; // model path                                                    // NOLINT
-    std::string model_draft          = ""; // draft model for speculative decoding                          // NOLINT
     std::string model_alias          = "unknown"; // model alias                                            // NOLINT
     std::string model_url            = ""; // model url to download                                         // NOLINT
     std::string hf_token             = ""; // HF token                                                      // NOLINT

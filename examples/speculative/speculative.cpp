@@ -41,7 +41,7 @@ int main(int argc, char ** argv) {
 
     gpt_init();
 
-    if (params.model_draft.empty()) {
+    if (params.speculative.model.empty()) {
         LOG_ERR("%s: --model-draft is required\n", __func__);
         return 1;
     }
@@ -68,7 +68,7 @@ int main(int argc, char ** argv) {
     // load the draft model
     // make a hard copy of params to use for the draft model
     gpt_params params_draft   = params;
-    params_draft.model        = params_draft.model_draft;
+    params_draft.model        = params_draft.speculative.model;
     params_draft.n_gpu_layers = params_draft.n_gpu_layers_draft;
     params_draft.n_world      = 1;    // do not split the draft model across devices
     params_draft.rank         = 0;    // always load the draft model on the head device

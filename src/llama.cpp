@@ -20934,6 +20934,12 @@ struct llama_context * llama_new_context_with_model(
     ctx->cparams.rank    = params.rank;
     ctx->cparams.force   = params.force;
     ctx->cparams.original_next_rank = (params.rank + 1) % params.n_world;
+    
+    auto &hparams = model->hparams;
+    auto &cparams = ctx->cparams;
+    cparams.n_ctx            = params.n_ctx           == 0    ? hparams.n_ctx_train           : params.n_ctx;
+    ctx->logits_all = params.logits_all;
+
     return ctx;
 }
 

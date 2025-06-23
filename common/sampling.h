@@ -60,6 +60,27 @@ void gpt_perf_print(const struct llama_context * ctx, const struct gpt_sampler *
 //
 llama_token gpt_sampler_sample(struct gpt_sampler * gsmpl, struct llama_context * ctx, int idx, bool grammar_first = false);
 
+// generalized version of gpt_sampler_sample
+//
+// will cross-reference the sampled tokens with a batch of draft tokens and accept those that match
+// if the sampler disagrees at some point, we stop and return the accepted tokens up to now
+//
+//      gpt_sampler_sample_n(gsmpl, ctx, { idx }, {});
+//
+// is equivalent to
+//
+//      gpt_sampler_sample(gsmpl, ctx, idx);
+//      gpt_sampler_accept(gsmpl, token, true);
+//
+// requires: idxs.size() == draft.size() + 1
+//
+// returns at least 1 token, up to idxs.size()
+//
+std::vector<llama_token> gpt_sampler_sample_and_accept_n(struct gpt_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, bool grammar_first = false);
+
+// assume idxs == [ 0, 1, 2, ..., draft.size() ]
+std::vector<llama_token> gpt_sampler_sample_and_accept_n(struct gpt_sampler * gsmpl, struct llama_context * ctx, const llama_tokens & draft, bool grammar_first = false);
+
 uint32_t gpt_sampler_get_seed(const struct gpt_sampler * gsmpl);
 
 // helpers
