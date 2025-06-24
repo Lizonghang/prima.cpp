@@ -1992,6 +1992,7 @@ struct llama_context_params llama_context_params_from_gpt_params(const gpt_param
     cparams.keep_out_in_metal = params.keep_out_in_metal;
     cparams.n_gpu_layers      = params.n_gpu_layers;
     cparams.n_cycles          = params.n_cycles;
+    cparams.is_perplexity_eval= params.is_perplexity_eval;
     std::copy(std::begin(params.n_layer_window), std::end(params.n_layer_window), cparams.n_layer_window);
 
     if (cparams.master_ip != nullptr) {
