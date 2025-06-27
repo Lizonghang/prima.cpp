@@ -62,11 +62,11 @@ struct sync_meta {
     llama_seq_id ** seq_id     = nullptr;
     llama_pos    all_pos_0;
     llama_pos    all_pos_1;
+
     uint32_t     n_ctx         = 0;
     
     // used for perplexity evaluation
     int32_t      n_outputs; 
-    bool         chunk_done    = false; // signal that the chunk is done
 
     // signal to clear the kv cache
     bool         clear_kv_cache= false;
@@ -98,8 +98,9 @@ struct sync_meta {
     llama_pos    div_p1        = 0;
     int          div_factor    = 1;
 
-    // signal to transfer tokens_size
+    // perplexity evaluation
     size_t       tokens_size   = 0;
+    int          n_chunks      = -1; 
 };
 
 #ifdef __cplusplus
@@ -507,8 +508,8 @@ extern "C" {
 
     LLAMA_API void llama_init_sockets      (struct llama_context * ctx, uint32_t n_world, uint32_t my_rank);
     LLAMA_API void llama_free_sockets      (struct llama_context * ctx, char ** msg);
-    LLAMA_API int  llama_recv_meta         (struct llama_context * ctx, struct sync_meta * meta, bool reverse);
-    LLAMA_API void llama_send_meta         (struct llama_context * ctx, struct sync_meta * meta, bool reverse);
+    LLAMA_API int  llama_recv_meta         (struct llama_context * ctx, struct sync_meta * meta);
+    LLAMA_API void llama_send_meta         (struct llama_context * ctx, struct sync_meta * meta);
     LLAMA_API int  llama_gather_device_info(struct llama_context * ctx, struct device_info * dev_info_set);
     LLAMA_API int  llama_send_device_info  (struct llama_context * ctx, struct device_info * dev_info);
     LLAMA_API int  llama_bcast_startup_args(struct llama_context * ctx, uint32_t rank, struct startup_args * args);

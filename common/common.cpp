@@ -1879,7 +1879,7 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
         params.sparams.ignore_eos = false;
     }
 
-    if (params.warmup) {
+    if (0) {
         LOG_WRN("%s: warming up the model with an empty run - please wait ...\n", __func__);
 
         const uint32_t my_rank = cparams.rank;
@@ -2006,7 +2006,6 @@ struct llama_context_params llama_context_params_from_gpt_params(const gpt_param
     }
     cparams.next_node_ip      = new char[params.next_node_ip.length() + 1];
     std::strcpy(cparams.next_node_ip, params.next_node_ip.c_str());
-
     cparams.n_ctx             = params.n_ctx;
     cparams.n_predict         = params.n_predict;
     cparams.n_seq_max         = params.n_parallel;

@@ -3492,8 +3492,7 @@ struct llama_context {
     // sockets
     std::string      master_ip     = "localhost";
     std::string      next_node_ip  = "localhost";
-    std::string      prev_node_ip  = "localhost";
-    uint32_t         data_port     = 9000;
+    uint32_t         data_port     = 9043;
     uint32_t         signal_port   = 10000;
     zmq::context_t * sock_context  = nullptr;
     zmq::socket_t  * send_socket   = nullptr; 
@@ -17872,27 +17871,33 @@ struct input_tensors {
     ggml_tensor * inp_pos;
 };
 
-void llama_send_meta(llama_context * ctx, struct sync_meta * meta, bool reverse = false) {
+void llama_send_meta(llama_context * ctx, struct sync_meta * meta) {
     GGML_ASSERT(ctx != nullptr);
     GGML_ASSERT(meta != nullptr);
 
-    zmq::socket_t * send_socket = reverse ? ctx->reverse_send_socket : ctx->send_socket;
+    zmq::socket_t * send_socket = ctx->send_socket;
     GGML_ASSERT(send_socket != nullptr); 
 
     try {
         std::vector<zmq::message_t> send_msgs;
 
-        // Handle chunk_done signal
-        if (meta->chunk_done) {
-            send_msgs.emplace_back("chunk_done", strlen("chunk_done"));
+        if (meta->clear_kv_cache) {
+            send_msgs.emplace_back("clear_kv_cache", strlen("clear_kv_cache"));
             send_msgs.emplace_back("1", 1);
             zmq::send_multipart(*send_socket, send_msgs);
             return;
         }
-
-        if (meta->clear_kv_cache) {
-            send_msgs.emplace_back("clear_kv_cache", strlen("clear_kv_cache"));
-            send_msgs.emplace_back("1", 1);
+    
+        if (meta->tokens_size > 0) {
+            send_msgs.emplace_back("tokens_size", strlen("tokens_size"));
+            send_msgs.emplace_back(&(meta->tokens_size), sizeof(meta->tokens_size));
+            
+            if (meta->n_chunks >= 0) {
+                send_msgs.emplace_back("n_chunks", strlen("n_chunks"));
+                send_msgs.emplace_back(&(meta->n_chunks), sizeof(meta->n_chunks));
+            }
+            
+            zmq::send_multipart(*send_socket, send_msgs);
             return;
         }
 
@@ -17933,11 +17938,6 @@ void llama_send_meta(llama_context * ctx, struct sync_meta * meta, bool reverse 
             send_msgs.emplace_back(&(meta->div_factor), sizeof(meta->div_factor));
             zmq::send_multipart(*send_socket, send_msgs);
             return;
-        }
-
-        if (meta->tokens_size > 0) {
-            send_msgs.emplace_back("tokens_size", strlen("tokens_size"));
-            send_msgs.emplace_back(&(meta->tokens_size), sizeof(meta->tokens_size));
         }
 
         if (meta->n_tokens > 0) {
@@ -18001,34 +18001,29 @@ void llama_send_meta(llama_context * ctx, struct sync_meta * meta, bool reverse 
     }
 }
 
-int llama_recv_meta(llama_context * ctx, struct sync_meta * meta, bool reverse = false) {
-    zmq::socket_t * recv_socket = reverse ? ctx->reverse_recv_socket : ctx->recv_socket;
+int llama_recv_meta(llama_context * ctx, struct sync_meta * meta) {
+    zmq::socket_t * recv_socket = ctx->recv_socket;
     GGML_ASSERT(recv_socket != nullptr);
-    
     recv_socket->set(zmq::sockopt::rcvtimeo, 1000);
 
     std::vector<zmq::message_t> recv_msgs;
 
-    if (!zmq::recv_multipart(*(ctx->recv_socket), std::back_inserter(recv_msgs))) {
+    if (!zmq::recv_multipart(*recv_socket, std::back_inserter(recv_msgs))) {
         recv_socket->set(zmq::sockopt::rcvtimeo, -1); // Reset timeout to blocking mode before returning error
         return -1;
     }
 
-    ctx->recv_socket->set(zmq::sockopt::rcvtimeo, -1);
+    recv_socket->set(zmq::sockopt::rcvtimeo, -1);
 
     const std::string cmd = recv_msgs[0].to_string();
     size_t idx = 1;
 
-    // Handle chunk_done signal
-    if (cmd == "chunk_done") {
-        meta->chunk_done = true;
-        return 0;  
-    }
-
-    if (cmd == "clear_kv_cache" && recv_msgs.size() == 1) {
+    if (cmd == "clear_kv_cache" && recv_msgs.size() == 2) {
         meta->clear_kv_cache = true;
         return 0;
     }
+
+    
 
     if (cmd == "kv_seq_rm" && recv_msgs.size() == 4) {
         meta->kv_seq_rm = true;
@@ -18076,22 +18071,17 @@ int llama_recv_meta(llama_context * ctx, struct sync_meta * meta, bool reverse =
         std::string key = recv_msgs[i].to_string();
         zmq::message_t & data_msg = recv_msgs[i + 1];
 
-        if (key == "tokens_size") {
-            GGML_ASSERT(data_msg.size() == sizeof(meta->tokens_size));
-            std::memcpy(&(meta->tokens_size), data_msg.data(), sizeof(meta->tokens_size));
-        }
-        else if (key == "n_tokens") {
+        if (key == "n_tokens") {
             GGML_ASSERT(data_msg.size() == sizeof(meta->n_tokens));
             std::memcpy(&(meta->n_tokens), data_msg.data(), sizeof(meta->n_tokens));
+        } else if (key == "n_chunks") {
+            GGML_ASSERT(data_msg.size() == sizeof(meta->n_chunks));
+            std::memcpy(&(meta->n_chunks), data_msg.data(), sizeof(meta->n_chunks));
         }
         else if (key == "n_outputs") {
             GGML_ASSERT(data_msg.size() == sizeof(meta->n_outputs));
             std::memcpy(&(meta->n_outputs), data_msg.data(), sizeof(meta->n_outputs));
         }
-        // else if (key == "chunk_start_pos") {
-        //     GGML_ASSERT(data_msg.size() == sizeof(meta->chunk_start_pos));
-        //     std::memcpy(&(meta->chunk_start_pos), data_msg.data(), sizeof(meta->chunk_start_pos));
-        // }
         else if (key == "n_ctx") {
             GGML_ASSERT(data_msg.size() == sizeof(meta->n_ctx));
             std::memcpy(&(meta->n_ctx), data_msg.data(), sizeof(meta->n_ctx));
@@ -18416,7 +18406,7 @@ static int llama_decode_internal(
         bool is_last_dev = (my_rank == n_world - 1);
 
         if (my_rank != 0) {
-            if (llama_recv_meta(&lctx, &meta, false) == -1) {
+            if (llama_recv_meta(&lctx, &meta) == -1) {
                 return -1;
             }
 
@@ -18477,7 +18467,7 @@ static int llama_decode_internal(
             meta.pos       = batch_all.pos;
             meta.all_pos_0 = batch_all.all_pos_0;
             meta.all_pos_1 = batch_all.all_pos_1;
-            llama_send_meta(&lctx, &meta, false);
+            llama_send_meta(&lctx, &meta);
         } 
     }
     
@@ -20615,14 +20605,9 @@ void llama_init_sockets(struct llama_context * ctx, uint32_t n_world, uint32_t m
     }
 
     ctx->sock_context  = new zmq::context_t(2); 
-
     ctx->send_socket   = new zmq::socket_t(*ctx->sock_context, zmq::socket_type::push);
     ctx->recv_socket   = new zmq::socket_t(*ctx->sock_context, zmq::socket_type::pull);
     ctx->signal_socket = new zmq::socket_t(*ctx->sock_context, zmq::socket_type::pull);
-
-    // Reverse pipeline sockets (new - for barriers)
-    ctx->reverse_send_socket = new zmq::socket_t(*ctx->sock_context, zmq::socket_type::push);
-    ctx->reverse_recv_socket = new zmq::socket_t(*ctx->sock_context, zmq::socket_type::pull);
 
     if (my_rank != 0 && my_rank != (n_world - 1)) {
         ctx->master_socket = new zmq::socket_t(*ctx->sock_context, zmq::socket_type::push);
@@ -20631,37 +20616,17 @@ void llama_init_sockets(struct llama_context * ctx, uint32_t n_world, uint32_t m
     }
 
     const uint32_t next_rank = (my_rank + 1) % n_world;
-    const uint32_t prev_rank = (my_rank - 1 + n_world) % n_world;
-
     std::string recv_endp   = "tcp://*:"                         + std::to_string(map_rank_to_port(my_rank,   ctx->data_port));
     std::string send_endp   = "tcp://" + ctx->next_node_ip + ":" + std::to_string(map_rank_to_port(next_rank, ctx->data_port));
     std::string master_endp = "tcp://" + ctx->master_ip    + ":" + std::to_string(map_rank_to_port(0,         ctx->data_port));
     std::string signal_endp = "tcp://*:"                         + std::to_string(map_rank_to_port(my_rank,   ctx->signal_port));
 
-    // Reverse pipeline endpoints (new)
-    // Use a different port offset for reverse communication to avoid conflicts
-    const uint32_t reverse_port_offset = 1000;
-    std::string reverse_recv_endp = "tcp://*:"                         + std::to_string(map_rank_to_port(my_rank,   ctx->data_port + reverse_port_offset));
-    std::string reverse_send_endp = "tcp://" + ctx->prev_node_ip + ":" + std::to_string(map_rank_to_port(prev_rank, ctx->data_port + reverse_port_offset));
-
     try {
         ctx->recv_socket->bind(recv_endp);
         ctx->signal_socket->bind(signal_endp);
-
         ctx->send_socket->connect(send_endp);
         if (ctx->master_socket && my_rank != (n_world - 1)) {
             ctx->master_socket->connect(master_endp);
-        }
-
-        // Setup reverse pipeline sockets
-        if (my_rank > 0) {
-            // All ranks except rank 0 can send to previous rank
-            ctx->reverse_send_socket->connect(reverse_send_endp);
-        }
-        
-        if (my_rank < n_world - 1) {
-            // All ranks except last rank can receive from next rank
-            ctx->reverse_recv_socket->bind(reverse_recv_endp);
         }
     } catch (const zmq::error_t &e) {
         LLAMA_LOG_INFO("Error binding/connecting recv socket to endpoint: %s", e.what());
@@ -20936,7 +20901,6 @@ void llama_free_sockets(struct llama_context * ctx, char ** msg) {
     const uint32_t my_rank   = ctx->cparams.rank;
     // to adapt to the new topology, use old next_rank
     const uint32_t next_rank = ctx->cparams.original_next_rank;
-    const uint32_t prev_rank = (my_rank - 1 + n_world) % n_world;
 
     if (n_world == 1) {
         return;
@@ -20959,89 +20923,6 @@ void llama_free_sockets(struct llama_context * ctx, char ** msg) {
         delete[] *msg;  // clean up the old message if any
         *msg = new char[msg_str.size() + 1];
         std::strcpy(*msg, msg_str.c_str());
-    }
-
-    // Send shutdown signal through reverse pipeline as well
-    if (my_rank == n_world - 1) {
-        // Last rank initiates reverse shutdown
-        try {
-            sync_meta shutdown_meta;
-            shutdown_meta.chunk_done = true;  // Reuse chunk_done as shutdown signal
-            llama_send_meta(ctx, &shutdown_meta, true);  // reverse = true
-        } catch (const zmq::error_t &e) {
-            LLAMA_LOG_INFO("Error sending reverse shutdown signal: %s", e.what());
-        }
-    } else if (my_rank > 0) {
-        // Intermediate ranks relay reverse shutdown signal
-        try {
-            sync_meta shutdown_meta;
-            // Set a short timeout for shutdown
-            ctx->reverse_recv_socket->set(zmq::sockopt::rcvtimeo, 500);
-            
-            if (llama_recv_meta(ctx, &shutdown_meta, true) == 0) {
-                if (my_rank > 0) {
-                    llama_send_meta(ctx, &shutdown_meta, true);  // relay upstream
-                }
-            }
-            
-            // Reset timeout
-            ctx->reverse_recv_socket->set(zmq::sockopt::rcvtimeo, -1);
-        } catch (const zmq::error_t &e) {
-            LLAMA_LOG_INFO("Error handling reverse shutdown signal on rank %d: %s", my_rank, e.what());
-        }
-    }
-
-    try {
-        // Close signal sender (local socket created in this function)
-        signal_sender.close();
-        
-        // Close reverse sockets first
-        if (ctx->reverse_send_socket) {
-            ctx->reverse_send_socket->close();
-            delete ctx->reverse_send_socket;
-            ctx->reverse_send_socket = nullptr;
-        }
-        
-        if (ctx->reverse_recv_socket) {
-            ctx->reverse_recv_socket->close();
-            delete ctx->reverse_recv_socket;
-            ctx->reverse_recv_socket = nullptr;
-        }
-        
-        // Close existing forward sockets
-        if (ctx->send_socket) {
-            ctx->send_socket->close();
-            delete ctx->send_socket;
-            ctx->send_socket = nullptr;
-        }
-        
-        if (ctx->recv_socket) {
-            ctx->recv_socket->close();
-            delete ctx->recv_socket;
-            ctx->recv_socket = nullptr;
-        }
-        
-        if (ctx->signal_socket) {
-            ctx->signal_socket->close();
-            delete ctx->signal_socket;
-            ctx->signal_socket = nullptr;
-        }
-        
-        // Handle master_socket cleanup (be careful not to double-delete)
-        if (ctx->master_socket && my_rank != (n_world - 1) && ctx->master_socket != ctx->send_socket) {
-            ctx->master_socket->close();
-            delete ctx->master_socket;
-            ctx->master_socket = nullptr;
-        }
-        
-        // Cleanup ZMQ context last
-        if (ctx->sock_context) {
-            delete ctx->sock_context;
-            ctx->sock_context = nullptr;
-        }
-        
-    } catch (const zmq::error_t &e) {
-        LLAMA_LOG_INFO("Error cleaning up sockets: %s", e.what());
     }
 }
 
