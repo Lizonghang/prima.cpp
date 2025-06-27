@@ -727,6 +727,7 @@ struct server_context {
             params_dft.model        = params.speculative.model;
             params_dft.n_ctx        = params.speculative.n_ctx;
             params_dft.n_gpu_layers = params.speculative.n_gpu_layers;
+            params_dft.use_mlock    = true;
             params_dft.n_world      = 1;  // do not split the draft model across devicesAdd commentMore actions
             params_dft.rank         = 0;  // always load the draft model on the head device
 
@@ -749,9 +750,14 @@ struct server_context {
 
                 return false;
             }
-
+            
             cparams_dft = llama_context_params_from_gpt_params(params);
             cparams_dft.n_batch = llama_n_ctx(llama_init_dft.context);
+            cparams_dft.n_world = 1;
+            cparams_dft.rank    = 0;
+            std::fill_n(cparams_dft.n_layer_window, 32, 0);
+            cparams_dft.n_layer_window[0] = llama_n_layer(model_dft);
+            cparams_dft.n_gpu_layers      = params.speculative.n_gpu_layers;
 
             // the context is not needed - we will create one for each slot
             llama_free(llama_init_dft.context);
@@ -785,10 +791,10 @@ struct server_context {
 
                 slot.ctx_dft = llama_new_context_with_model(model_dft, cparams_dft);
                 
-                if (llama_context_setup_backend(model, cparams_dft, slot.ctx_dft) == nullptr) {
-                    SRV_ERR("%s: failed to setup context with model '%s'\n", __func__, params.model.c_str());
+                if (llama_context_setup_backend(model_dft, cparams_dft, slot.ctx_dft) == nullptr) {
+                    SRV_ERR("%s: failed to setup context with model '%s'\n", __func__, params.speculative.model.c_str());
                     llama_free(slot.ctx_dft);
-                    llama_free_model(model);
+                    llama_free_model(model_dft);
                     return;
                 }
                 

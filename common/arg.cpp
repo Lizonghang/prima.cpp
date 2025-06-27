@@ -1543,13 +1543,14 @@ gpt_params_context gpt_params_parser_init(gpt_params & params, llama_example ex,
         {"-ngld", "--gpu-layers-draft", "--n-gpu-layers-draft"}, "N",
         "number of layers to store in VRAM for the draft model",
         [](gpt_params & params, int value) {
-            params.n_gpu_layers_draft = value;
+            params.n_gpu_layers_draft = value; // TODO: remove
+            params.speculative.n_gpu_layers = value;
             if (!llama_supports_gpu_offload()) {
                 fprintf(stderr, "warning: not compiled with GPU offload support, --gpu-layers-draft option will be ignored\n");
                 fprintf(stderr, "warning: see main README.md for information on enabling GPU BLAS support\n");
             }
         }
-    ).set_examples({LLAMA_EXAMPLE_SPECULATIVE}));
+    ).set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER}));
     add_opt(llama_arg(
         {"-sm", "--split-mode"}, "{none,layer,row}",
         "how to split the model across multiple GPUs, one of:\n"
