@@ -533,8 +533,8 @@ static results_perplexity perplexity(llama_context * ctx, const gpt_params & par
             llama_send_meta(ctx, &meta);
             LOG_INF("%s: rank 0 tokens_size sent successfully\n", __func__);
         } else {
-            LOG_INF("%s: rank %d waiting 5 seconds for rank 0 to complete tokenization\n", __func__, my_rank);
-            std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+            LOG_INF("%s: rank %d waiting 7 seconds for rank 0 to complete tokenization\n", __func__, my_rank);
+            std::this_thread::sleep_for(std::chrono::milliseconds(7000));
             LOG_INF("%s: rank %d delay completed, now receiving tokens_size\n", __func__, my_rank);
             if (llama_recv_meta(ctx, &meta) == -1) {
                 return { {}, -1.0, {}, {} };

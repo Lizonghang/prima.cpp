@@ -17892,10 +17892,8 @@ void llama_send_meta(llama_context * ctx, struct sync_meta * meta) {
             send_msgs.emplace_back("tokens_size", strlen("tokens_size"));
             send_msgs.emplace_back(&(meta->tokens_size), sizeof(meta->tokens_size));
             
-            if (meta->n_chunks >= 0) {
-                send_msgs.emplace_back("n_chunks", strlen("n_chunks"));
-                send_msgs.emplace_back(&(meta->n_chunks), sizeof(meta->n_chunks));
-            }
+            send_msgs.emplace_back("n_chunks", strlen("n_chunks"));
+            send_msgs.emplace_back(&(meta->n_chunks), sizeof(meta->n_chunks));
             
             zmq::send_multipart(*send_socket, send_msgs);
             return;
@@ -18015,6 +18013,11 @@ int llama_recv_meta(llama_context * ctx, struct sync_meta * meta) {
 
     recv_socket->set(zmq::sockopt::rcvtimeo, -1);
 
+    if (recv_msgs.size() < 2) {
+        LLAMA_LOG_ERROR("Invalid message format: too few messages\n");
+        return -1;
+    }
+
     const std::string cmd = recv_msgs[0].to_string();
     size_t idx = 1;
 
@@ -18022,8 +18025,6 @@ int llama_recv_meta(llama_context * ctx, struct sync_meta * meta) {
         meta->clear_kv_cache = true;
         return 0;
     }
-
-    
 
     if (cmd == "kv_seq_rm" && recv_msgs.size() == 4) {
         meta->kv_seq_rm = true;
@@ -18057,6 +18058,19 @@ int llama_recv_meta(llama_context * ctx, struct sync_meta * meta) {
         std::memcpy(&meta->div_p0,        recv_msgs[idx++].data(), sizeof(meta->div_p0));
         std::memcpy(&meta->div_p1,        recv_msgs[idx++].data(), sizeof(meta->div_p1));
         std::memcpy(&meta->div_factor,    recv_msgs[idx++].data(), sizeof(meta->div_factor));
+        return 0;
+    }
+
+    if (cmd == "tokens_size" && recv_msgs.size() == 4) {
+        std::memcpy(&(meta->tokens_size), recv_msgs[1].data(), sizeof(meta->tokens_size));
+        
+        std::string chunks_key = recv_msgs[2].to_string();
+        if (chunks_key == "n_chunks") {
+            std::memcpy(&(meta->n_chunks), recv_msgs[3].data(), sizeof(meta->n_chunks));
+        } else {
+            LLAMA_LOG_ERROR("Expected 'n_chunks' key but got '%s'\n", chunks_key.c_str());
+            return -1;
+        }
         return 0;
     }
 
@@ -18357,7 +18371,6 @@ static int llama_decode_internal(
 
     GGML_ASSERT(!(my_rank == 0 && n_tokens_all == 0) && "n_tokens == 0 on master node");
 
-    GGML_ASSERT((!batch_all.token && batch_all.embd) || (batch_all.token && !batch_all.embd)); // NOLINT
     if (batch_all.token) {
         for (uint32_t i = 0; i < n_tokens_all; ++i) {
             if (batch_all.token[i] < 0 || (uint32_t)batch_all.token[i] >= model.vocab.n_vocab) {
