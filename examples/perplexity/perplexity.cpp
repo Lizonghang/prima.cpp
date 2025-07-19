@@ -632,18 +632,39 @@ static results_perplexity perplexity(llama_context * ctx, const gpt_params & par
         const auto t_start = std::chrono::high_resolution_clock::now();
 
         {
-            // synvhronize the KV cache clear signal across all ranks
+            // synchronize the KV cache clear signal across all ranks
             if (n_world > 1) {
                 sync_meta clear_meta; 
                 clear_meta.clear_kv_cache = true;
 
                 if (my_rank == 0) {
+                    // Rank 0 sends the signal
                     llama_send_meta(ctx, &clear_meta);
                 } else {
-                    if (llama_recv_meta(ctx, &clear_meta) == -1) {
-                        LOG_ERR("Failed to recv clear_kv_cache signal on rank %d\n", my_rank);
+                    // Non-rank 0 devices receive the signal with retry mechanism
+                    int retry_count = 0;
+                    const int max_retries = 5;
+                    bool recv_success = false;
+                    
+                    while (retry_count < max_retries && !recv_success) {
+                        if (llama_recv_meta(ctx, &clear_meta) == 0) {
+                            recv_success = true;
+                        } else {
+                            retry_count++;
+                            LOG_WRN("Failed to recv clear_kv_cache signal on rank %d, retry %d/%d\n", 
+                                   my_rank, retry_count, max_retries);
+                            // Small delay before retry
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        }
+                    }
+                    
+                    if (!recv_success) {
+                        LOG_ERR("Failed to recv clear_kv_cache signal on rank %d after %d retries\n", 
+                               my_rank, max_retries);
                         return {tokens, -1.0, {}, {}};
                     }
+                    
+                    // Forward the signal to next rank if not the last device
                     if (!is_last_dev) {
                         llama_send_meta(ctx, &clear_meta);
                     }
@@ -707,9 +728,26 @@ static results_perplexity perplexity(llama_context * ctx, const gpt_params & par
             // Chain forwarding pattern: consistent with tokens_size communication
             if (n_world > 1) {
                 if (my_rank != 0) {
-                    // Non-rank 0 devices receive batch meta data
-                    if (llama_recv_meta(ctx, &meta) == -1) {
-                        LOG_ERR("Failed to recv batch meta on rank %d\n", my_rank);
+                    // Non-rank 0 devices receive batch meta data with retry mechanism
+                    int retry_count = 0;
+                    const int max_retries = 3;
+                    bool recv_success = false;
+                    
+                    while (retry_count < max_retries && !recv_success) {
+                        if (llama_recv_meta(ctx, &meta) == 0) {
+                            recv_success = true;
+                        } else {
+                            retry_count++;
+                            LOG_WRN("Failed to recv batch meta on rank %d, retry %d/%d\n", 
+                                   my_rank, retry_count, max_retries);
+                            // Small delay before retry
+                            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        }
+                    }
+                    
+                    if (!recv_success) {
+                        LOG_ERR("Failed to recv batch meta on rank %d after %d retries\n", 
+                               my_rank, max_retries);
                         return {tokens, -1.0, {}, {}};
                     }
                     
