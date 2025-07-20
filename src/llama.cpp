@@ -18001,7 +18001,7 @@ void llama_send_meta(llama_context * ctx, struct sync_meta * meta) {
 int llama_recv_meta(llama_context * ctx, struct sync_meta * meta) {
     zmq::socket_t * recv_socket = ctx->recv_socket;
     GGML_ASSERT(recv_socket != nullptr);
-    recv_socket->set(zmq::sockopt::rcvtimeo, 5000);  // Increase timeout to 5 seconds
+    recv_socket->set(zmq::sockopt::rcvtimeo, 10000);  // Increase timeout to 10 seconds for better robustness
 
     std::vector<zmq::message_t> recv_msgs;
 
